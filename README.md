@@ -80,9 +80,6 @@ Create `~/.config/opencode/supermemory.jsonc`:
 
   // The single container used for all reads and writes (default: "opencode")
   "containerTag": "opencode",
-
-  // Extra keyword patterns for memory detection (regex)
-  "keywordPatterns": ["log\\s+this", "write\\s+down", "remember\\s+that"],
 }
 
 ```
