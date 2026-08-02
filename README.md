@@ -1,149 +1,153 @@
 # oc-supermemory-redux
 
-Clean Supermemory plugin for OpenCode. Follows the [Supermemory docs](https://supermemory.ai/docs) directly. no legacy compatibility shims, no cross-editor config discovery, no compaction takeover, no version-check banners.
+A focused [Supermemory](https://supermemory.ai/docs) plugin for OpenCode. It follows the current API contracts without legacy cross-editor tag discovery, custom compaction handling, or version-check banners.
 
-## What It Does
+## Features
 
-- **Recalls on every message** (not just the first) injects profile + memories into the model's context as a `[SUPERMEMORY]` block via the `chat.message` hook
-- **Provides a `supermemory` tool** with `add`, `search`, `profile`, `list`, and `forget` modes
-- **No Cross Folder Config Hunting** Uses one defined config folder + 1 additional file for credentials if preferred. all centralized in `~/.configs/opencode/`
-- **Ingests conversations on session idle** sends the full session transcript to Supermemory under a stable `customId` so the dreaming pipeline can extract facts and link entities (per the [Quickstart](https://supermemory.ai/docs/quickstart) pattern)
-- **Uses a single `containerTag`** one bucket, one query, no fan-out across empty legacy buckets
-- **Logs via `client.app.log()`** no log files dumped in users `$HOME` directory.
+- Fetches the configured container's profile on the first message of a session and includes search results for that message.
+- Searches for relevant memories on every later message.
+- Incrementally sends structured user and assistant turns to `/v4/conversations` under a stable conversation ID.
+- Uses one configurable `containerTag` for all reads and writes.
+- Creates direct memories through `/v4/memories` rather than document ingestion.
+- Provides `add`, `update`, `search`, `profile`, `list`, `get`, and `forget` tool modes.
+- Lists document metadata first and retrieves complete document content only when requested.
+- Synchronizes the configured `entityContext` with the container's settings.
+- Displays OpenCode toast notifications for invalid configuration and backend failures.
+- Keeps recall and conversation ingestion independent so one failing path does not block the other.
 
 ## Installation
 
-### Option A: Bundled (recommended)
+OpenCode loads local plugins from its `plugins` configuration directory. The default directory is `~/.config/opencode/plugins/`
 
-1. Clone and build:
+### Prebuilt Plugin
+
+The repository includes a self-contained `supermemory-redux.js` bundle, so Bun is not required.
+
 ```sh
-git clone <repo-url> ~/repos/oc-supermemory-redux
-cd oc-supermemory-redux
-bun install
-bun run build
+mkdir -p "~/.config/opencode/plugins"
+curl -fsSL \
+  https://raw.githubusercontent.com/Drewlius/oc-supermemory-redux/main/supermemory-redux.js \
+  -o "~/.config/opencode/plugins/supermemory-redux.js"
 ```
 
-2. Copy the bundled file to opencode's plugins directory:
-```sh
-mkdir -p ~/.config/opencode/plugins
-cp dist/index.js ~/.config/opencode/plugins/supermemory-redux.js
+Create the [configuration file](#configuration) at:
+
+```text
+~/.config/opencode/supermemory.jsonc
 ```
 
-The bundle is self-contained (all dependencies inlined by `bun build`). No `node_modules` needed in the plugins directory. No entry in `opencode.jsonc`'s `plugin` array needed local plugins are auto-discovered from the `plugins/` directory.
+No entry in `opencode.jsonc` is required. OpenCode automatically discovers JavaScript files in the local `plugins` directory.
 
-### Option B: Unbundled (for development)
-
-1. Clone to `~/.config/opencode/plugins/oc-supermemory-redux/`
-2. Add dependencies to `~/.config/opencode/package.json`:
-```json
-{
-  "dependencies": {
-    "@opencode-ai/plugin": "^1.0.162",
-    "supermemory": "^4.0.0"
-  }
-}
-```
-3. OpenCode runs `bun install` at startup to install these.
-4. The plugin's `src/index.ts` imports from the shared `node_modules/`.
-
-Note: Option B shares `node_modules/` with other local plugins, which can cause version conflicts if multiple plugins declare different versions of the same dependency. Option A avoids this entirely.
-
-### Option C: Copy the pre-built file supermemory-redux.js
+### Build From Source
 
 ```sh
 git clone https://github.com/Drewlius/oc-supermemory-redux.git
 cd oc-supermemory-redux
-mkdir -p $HOME/.config/opencode/plugins
-cp supermemory-redux.js $HOME/.config/opencode/plugins/supermemory-redux.js
+bun install --frozen-lockfile
+bun run typecheck
+bun run build
+mkdir -p "~/.config/opencode/plugins"
+cp ./dist/index.js "~/.config/opencode/plugins/supermemory-redux.js"
 ```
+
+Then create the [configuration file](#configuration) at `~/.config/opencode/supermemory.jsonc`, or directly inside `OPENCODE_CONFIG_DIR` when that override is set.
+
+Restart OpenCode after installing or updating the plugin.
 
 ## Configuration
 
-Create `~/.config/opencode/supermemory.jsonc`:
+Create `supermemory.jsonc` in your OpenCode configuration directory:
 
 ```jsonc
 {
-  // API key (can also use SUPERMEMORY_API_KEY env var)
-  "apiKey": "",
+  // Omit this when using SUPERMEMORY_API_KEY or the credentials file.
+  "apiKey": "sm_...",
 
-  // Supermemory API base URL (point at a self-hosted instance, e.g. http://localhost:8787)
-  "baseUrl": "https://api.supermemory.ai",
-
-  // Min similarity for memory retrieval (0-1)
-  "similarityThreshold": 0.6,
-
-  // Max memories injected per request (default: 3)
-  "maxMemories": 3,
-
-  // Include user profile in context
-  "injectProfile": true,
-
-  // The single container used for all reads and writes (default: "opencode")
+  // One container for all plugin reads and writes.
   "containerTag": "opencode",
-}
 
-```
-
-### Minimum recommended config
-you can generate your api key [here](https://console.supermemory.ai/keys?create=false)
-```jsonc
-{
-  "apiKey": "your_api_key",
-  "containerTag": "<your-custom-tag>",
+  // Optional settings shown with their defaults.
+  "baseUrl": "https://api.supermemory.ai",
+  "similarityThreshold": 0.6,
+  "maxMemories": 3,
+  "injectProfile": true
 }
 ```
 
-That's it. Everything else has defaults. Without `containerTag`, the plugin uses `opencode`.
+The optional `entityContext` setting accepts a string up to 1,500 characters. If omitted, the plugin uses its built-in coding-agent context and synchronizes it with the configured container.
 
-### API key resolution order
+### API Key Resolution
+
+The first available API key is used:
 
 1. `SUPERMEMORY_API_KEY` environment variable
-2. `apiKey` field in `~/.config/opencode/supermemory.jsonc`
-3. `~/.config/opencode/supermemory-credentials.json` (separate credentials file)
+2. `apiKey` in `supermemory.jsonc`
+3. `apiKey` in `supermemory-credentials.json`
 
-The first source found wins. This plugin only reads from `~/.config/opencode/` — it does NOT read from `~/.codex/`, `~/.claude/`, `~/.cursor/`, or any other application's config directory.
+Both configuration files belong in the OpenCode configuration directory. The plugin does not inspect configuration belonging to Claude, Codex, Cursor, or other applications.
 
-## Architecture
+Invalid JSON, missing credentials, unsupported values, and unreachable back-end services produce a visible error toast in OpenCode. Configuration validation includes:
 
-```
-src/
-  config.ts    — config loading, JSONC parsing, API key discovery (184 lines)
-  index.ts     — hook registration, tool definition, recall injection, conversation ingest (389 lines)
-```
+- `containerTag`: 1-100 supported characters
+- `similarityThreshold`: number from 0 to 1
+- `maxMemories`: integer from 1 to 100
+- `injectProfile`: boolean
+- `entityContext`: maximum 1,500 characters
+- `baseUrl`: valid HTTP or HTTPS URL
 
-573 lines total. The bundled `dist/index.js` is a single self-contained file (~470KB).
+## <div align="center"> How It Works
+---
 
-### What this plugin does NOT do (by design)
+### Recall
 
-- **No legacy tag fan-out** the original opencode-supermemory queried 6 container tags per recall (claude, codex, cursor, opencode legacy buckets). This plugin queries one.
-- **No compaction** context window management is opencode's responsibility, not the plugin's.
-- **No version-check banner** no npm update notifications injected into your context.
-- **No cross-editor config discovery** does not read `~/.codex/`, `~/.claude/`, `~/.cursor/`, or any other application's config directory. Only reads from `~/.config/opencode/`.
-- **No log file in `$HOME`** uses `client.app.log()` for structured logging through opencode's built-in logging system.
+On the first user message for a session, the plugin calls `/v4/profile` with the user's message as the query. The response provides the static and dynamic profile plus query-specific search results in one request.
 
-## How it works
+Later messages call `/v4/search` in memories mode using the configured threshold and result limit. Retrieved context is injected as a synthetic `[SUPERMEMORY]` block.
 
-### Recall (chat.message hook)
+### Conversation Ingestion
 
-On the first user message in a session, the plugin fetches the profile once. Later messages call `/v4/search` with the current message, the configured `similarityThreshold`, and `maxMemories`. Results are formatted into a `[SUPERMEMORY]` block and injected as a synthetic part.
+On each user message, the plugin sends the previous assistant response and current user message as structured turns to `/v4/conversations`. The stable `conversationId` uses `session_<sessionID>`, allowing Supermemory to associate incremental updates with one conversation.
 
-### Save (supermemory tool, mode: "add")
+Recall and ingestion use separate failure paths. A failed profile or search request does not prevent conversation ingestion from being attempted.
 
-When the model calls the `supermemory` tool with `mode: "add"` and `type: "direct"`, the plugin creates a direct memory through `/v4/memories`, bypassing dreaming. `type: "document"` uses document ingestion and accepts `dreaming: "dynamic" | "instant"` (default: `"dynamic"`). The `scope` argument is metadata only; the single configured `containerTag` is the routing boundary.
+### Memory Tools
 
-### Conversation ingestion (chat.message hook)
+- `add`: Creates a direct, non-static memory through `/v4/memories`.
+- `update`: Corrects an existing memory through `PATCH /v4/memories` while preserving version history.
+- `search`: Searches Supermemory using hybrid mode.
+- `profile`: Retrieves the configured container's profile.
+- `list`: Lists recent document metadata without downloading complete document content.
+- `get`: Retrieves one complete document by ID.
+- `forget`: Soft-deletes a memory by ID or exact content.
 
-On each user message, the plugin sends the previous assistant response and current user message as structured turns to `/v4/conversations`. A stable `conversationId` of `session_<sessionID>` keeps the deltas attached to one conversation.
+Direct memories and conversation updates include `source: "opencode"` metadata for provenance. The plugin does not use metadata for routing or filtering.
 
-## Building 
+## Design Boundaries
+
+- No legacy container-tag fan-out
+- No cross-editor configuration discovery
+- No plugin-managed compaction
+- No version-check banner
+- No home-directory log file
+- No manual document-ingestion path while backend hybrid document retrieval remains unreliable
+
+OpenCode handles context-window management. Plugin diagnostics use OpenCode's structured logging and toast notifications.
+
+## Development
 
 ```sh
-bun install
+bun install --frozen-lockfile
+bun run typecheck
 bun run build
 ```
 
-This runs `bun build ./src/index.ts --outdir ./dist --target node && tsc --emitDeclarationOnly`. The output is a single `dist/index.js` with all dependencies inlined.
+The build produces the self-contained `dist/index.js` bundle. Keep the top-level `supermemory-redux.js` release artifact synchronized with that file.
 
-## License
+## Patch Notes
 
-MIT
+- Aligned profile, memory, container settings, and conversation behavior with current Supermemory APIs and SDK types.
+- Removed legacy scope, dreaming, metadata-routing, configurable-keyword, and manual document-ingestion paths.
+- Added direct memory update and complete document retrieval tools.
+- Added strict configuration validation and visible failure notifications.
+- Synchronized entity context through the container-settings endpoint.
+- Separated recall failures from conversation-ingestion failures.
