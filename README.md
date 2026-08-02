@@ -121,7 +121,7 @@ src/
 - **No cross-editor config discovery** does not read `~/.codex/`, `~/.claude/`, `~/.cursor/`, or any other application's config directory. Only reads from `~/.config/opencode/`.
 - **No log file in `$HOME`** uses `client.app.log()` for structured logging through opencode's built-in logging system.
 
-## How it works
+## <div align="center">How it works
 
 ### Recall (chat.message hook)
 
