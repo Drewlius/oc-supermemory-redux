@@ -10,30 +10,9 @@ export interface Config {
   maxMemories: number;
   injectProfile: boolean;
   entityContext: string;
-  keywordPatterns: string[];
 }
 
 const DEFAULT_BASE_URL = "https://api.supermemory.ai";
-
-const DEFAULT_KEYWORDS = [
-  "remember",
-  "memorize",
-  "save\\s+this",
-  "note\\s+this",
-  "keep\\s+in\\s+mind",
-  "don'?t\\s+forget",
-  "learn\\s+this",
-  "store\\s+this",
-  "record\\s+this",
-  "make\\s+a\\s+note",
-  "take\\s+note",
-  "jot\\s+down",
-  "commit\\s+to\\s+memory",
-  "never\\s+forget",
-  "always\\s+remember",
-  "log\\s+this",
-  "write\\s+down",
-];
 
 const DEFAULT_ENTITY_CONTEXT = `Shared coding-agent memory for one user.
 
@@ -112,8 +91,7 @@ function loadConfigFile(): Record<string, unknown> | null {
       return JSON.parse(stripJsoncComments(raw));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error(`[oc-supermemory-redux] Failed to parse ${path}: ${msg}`);
-      return null;
+      throw new Error(`Failed to parse ${path}: ${msg}`);
     }
   }
 
@@ -121,15 +99,33 @@ function loadConfigFile(): Record<string, unknown> | null {
 }
 
 function loadApiKey(fileConfig: Record<string, unknown> | null): string | undefined {
-  if (process.env.SUPERMEMORY_API_KEY) return process.env.SUPERMEMORY_API_KEY;
-  if (fileConfig?.apiKey) return fileConfig.apiKey as string;
+  if (process.env.SUPERMEMORY_API_KEY !== undefined) {
+    if (!process.env.SUPERMEMORY_API_KEY.trim()) {
+      throw new Error("SUPERMEMORY_API_KEY must be a non-empty string");
+    }
+    return process.env.SUPERMEMORY_API_KEY;
+  }
+  if (fileConfig?.apiKey !== undefined) {
+    if (typeof fileConfig.apiKey !== "string" || !fileConfig.apiKey.trim()) {
+      throw new Error("apiKey must be a non-empty string");
+    }
+    return fileConfig.apiKey;
+  }
 
   const opencodeCreds = join(homedir(), ".config", "opencode", "supermemory-credentials.json");
   if (existsSync(opencodeCreds)) {
     try {
       const c = JSON.parse(readFileSync(opencodeCreds, "utf-8"));
-      if (c.apiKey) return c.apiKey;
-    } catch {}
+      if (c.apiKey !== undefined) {
+        if (typeof c.apiKey !== "string" || !c.apiKey.trim()) {
+          throw new Error(`apiKey in ${opencodeCreds} must be a non-empty string`);
+        }
+        return c.apiKey;
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`Failed to parse ${opencodeCreds}: ${msg}`);
+    }
   }
 
   return undefined;
@@ -147,9 +143,10 @@ export function loadConfig(): Config {
     );
   }
 
-  const containerTag =
-    (fileConfig?.containerTag as string) ||
-    "opencode";
+  const containerTag = fileConfig?.containerTag ?? "opencode";
+  if (typeof containerTag !== "string" || !/^[a-zA-Z0-9_:-]{1,100}$/.test(containerTag)) {
+    throw new Error("containerTag must be 1-100 characters using letters, numbers, _, :, or -");
+  }
 
   if (!fileConfig?.containerTag) {
     console.warn(
@@ -159,17 +156,52 @@ export function loadConfig(): Config {
     );
   }
 
-  const userKeywords = (fileConfig?.keywordPatterns as string[]) || [];
-  const keywordPatterns = [...new Set([...DEFAULT_KEYWORDS, ...userKeywords])];
+  const baseUrl = fileConfig?.baseUrl ?? DEFAULT_BASE_URL;
+  if (typeof baseUrl !== "string") {
+    throw new Error("baseUrl must be a string");
+  }
+  let parsedBaseUrl: URL;
+  try {
+    parsedBaseUrl = new URL(baseUrl);
+  } catch {
+    throw new Error("baseUrl must be a valid URL");
+  }
+  if (parsedBaseUrl.protocol !== "http:" && parsedBaseUrl.protocol !== "https:") {
+    throw new Error("baseUrl must use http or https");
+  }
+
+  const similarityThreshold = fileConfig?.similarityThreshold ?? 0.6;
+  if (
+    typeof similarityThreshold !== "number" ||
+    !Number.isFinite(similarityThreshold) ||
+    similarityThreshold < 0 ||
+    similarityThreshold > 1
+  ) {
+    throw new Error("similarityThreshold must be a number between 0 and 1");
+  }
+
+  const maxMemories = fileConfig?.maxMemories ?? 3;
+  if (!Number.isInteger(maxMemories) || (maxMemories as number) < 1 || (maxMemories as number) > 100) {
+    throw new Error("maxMemories must be an integer between 1 and 100");
+  }
+
+  const injectProfile = fileConfig?.injectProfile ?? true;
+  if (typeof injectProfile !== "boolean") {
+    throw new Error("injectProfile must be a boolean");
+  }
+
+  const entityContext = fileConfig?.entityContext ?? DEFAULT_ENTITY_CONTEXT;
+  if (typeof entityContext !== "string" || entityContext.length > 1500) {
+    throw new Error("entityContext must be a string no longer than 1500 characters");
+  }
 
   return {
     apiKey,
-    baseUrl: (fileConfig?.baseUrl as string) || DEFAULT_BASE_URL,
+    baseUrl: parsedBaseUrl.toString().replace(/\/$/, ""),
     containerTag,
-    similarityThreshold: (fileConfig?.similarityThreshold as number) ?? 0.6,
-    maxMemories: (fileConfig?.maxMemories as number) ?? 3,
-    injectProfile: fileConfig?.injectProfile !== false,
-    entityContext: (fileConfig?.entityContext as string) || DEFAULT_ENTITY_CONTEXT,
-    keywordPatterns,
+    similarityThreshold,
+    maxMemories: maxMemories as number,
+    injectProfile,
+    entityContext,
   };
 }
