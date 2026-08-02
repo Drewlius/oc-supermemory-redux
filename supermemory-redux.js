@@ -12531,7 +12531,7 @@ var safeJSON = (text) => {
 var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // node_modules/supermemory/version.mjs
-var VERSION = "4.24.2";
+var VERSION = "4.25.4";
 
 // node_modules/supermemory/internal/detect-platform.mjs
 function getDetectedPlatform() {
@@ -13742,25 +13742,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 var DEFAULT_BASE_URL = "https://api.supermemory.ai";
-var DEFAULT_KEYWORDS = [
-  "remember",
-  "memorize",
-  "save\\s+this",
-  "note\\s+this",
-  "keep\\s+in\\s+mind",
-  "don'?t\\s+forget",
-  "learn\\s+this",
-  "store\\s+this",
-  "record\\s+this",
-  "make\\s+a\\s+note",
-  "take\\s+note",
-  "jot\\s+down",
-  "commit\\s+to\\s+memory",
-  "never\\s+forget",
-  "always\\s+remember",
-  "log\\s+this",
-  "write\\s+down"
-];
 var DEFAULT_ENTITY_CONTEXT = `Shared coding-agent memory for one user.
 
 EXTRACT:
@@ -13832,24 +13813,38 @@ function loadConfigFile() {
       return JSON.parse(stripJsoncComments(raw));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error(`[oc-supermemory-redux] Failed to parse ${path2}: ${msg}`);
-      return null;
+      throw new Error(`Failed to parse ${path2}: ${msg}`);
     }
   }
   return null;
 }
 function loadApiKey(fileConfig) {
-  if (process.env.SUPERMEMORY_API_KEY)
+  if (process.env.SUPERMEMORY_API_KEY !== undefined) {
+    if (!process.env.SUPERMEMORY_API_KEY.trim()) {
+      throw new Error("SUPERMEMORY_API_KEY must be a non-empty string");
+    }
     return process.env.SUPERMEMORY_API_KEY;
-  if (fileConfig?.apiKey)
+  }
+  if (fileConfig?.apiKey !== undefined) {
+    if (typeof fileConfig.apiKey !== "string" || !fileConfig.apiKey.trim()) {
+      throw new Error("apiKey must be a non-empty string");
+    }
     return fileConfig.apiKey;
+  }
   const opencodeCreds = join(homedir(), ".config", "opencode", "supermemory-credentials.json");
   if (existsSync(opencodeCreds)) {
     try {
       const c = JSON.parse(readFileSync(opencodeCreds, "utf-8"));
-      if (c.apiKey)
+      if (c.apiKey !== undefined) {
+        if (typeof c.apiKey !== "string" || !c.apiKey.trim()) {
+          throw new Error(`apiKey in ${opencodeCreds} must be a non-empty string`);
+        }
         return c.apiKey;
-    } catch {}
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`Failed to parse ${opencodeCreds}: ${msg}`);
+    }
   }
   return;
 }
@@ -13859,21 +13854,50 @@ function loadConfig() {
   if (!apiKey) {
     throw new Error("No Supermemory API key found. Set SUPERMEMORY_API_KEY env var, " + "add apiKey to ~/.config/opencode/supermemory.jsonc, or create " + '~/.config/opencode/supermemory-credentials.json with {"apiKey": "sm_..."}');
   }
-  const containerTag = fileConfig?.containerTag || "opencode";
+  const containerTag = fileConfig?.containerTag ?? "opencode";
+  if (typeof containerTag !== "string" || !/^[a-zA-Z0-9_:-]{1,100}$/.test(containerTag)) {
+    throw new Error("containerTag must be 1-100 characters using letters, numbers, _, :, or -");
+  }
   if (!fileConfig?.containerTag) {
     console.warn(`[oc-supermemory-redux] No containerTag set in config. ` + `Using "${containerTag}" as fallback. Set containerTag in ` + `~/.config/opencode/supermemory.jsonc to target your memory bucket.`);
   }
-  const userKeywords = fileConfig?.keywordPatterns || [];
-  const keywordPatterns = [...new Set([...DEFAULT_KEYWORDS, ...userKeywords])];
+  const baseUrl = fileConfig?.baseUrl ?? DEFAULT_BASE_URL;
+  if (typeof baseUrl !== "string") {
+    throw new Error("baseUrl must be a string");
+  }
+  let parsedBaseUrl;
+  try {
+    parsedBaseUrl = new URL(baseUrl);
+  } catch {
+    throw new Error("baseUrl must be a valid URL");
+  }
+  if (parsedBaseUrl.protocol !== "http:" && parsedBaseUrl.protocol !== "https:") {
+    throw new Error("baseUrl must use http or https");
+  }
+  const similarityThreshold = fileConfig?.similarityThreshold ?? 0.6;
+  if (typeof similarityThreshold !== "number" || !Number.isFinite(similarityThreshold) || similarityThreshold < 0 || similarityThreshold > 1) {
+    throw new Error("similarityThreshold must be a number between 0 and 1");
+  }
+  const maxMemories = fileConfig?.maxMemories ?? 3;
+  if (!Number.isInteger(maxMemories) || maxMemories < 1 || maxMemories > 100) {
+    throw new Error("maxMemories must be an integer between 1 and 100");
+  }
+  const injectProfile = fileConfig?.injectProfile ?? true;
+  if (typeof injectProfile !== "boolean") {
+    throw new Error("injectProfile must be a boolean");
+  }
+  const entityContext = fileConfig?.entityContext ?? DEFAULT_ENTITY_CONTEXT;
+  if (typeof entityContext !== "string" || entityContext.length > 1500) {
+    throw new Error("entityContext must be a string no longer than 1500 characters");
+  }
   return {
     apiKey,
-    baseUrl: fileConfig?.baseUrl || DEFAULT_BASE_URL,
+    baseUrl: parsedBaseUrl.toString().replace(/\/$/, ""),
     containerTag,
-    similarityThreshold: fileConfig?.similarityThreshold ?? 0.6,
-    maxMemories: fileConfig?.maxMemories ?? 3,
-    injectProfile: fileConfig?.injectProfile !== false,
-    entityContext: fileConfig?.entityContext || DEFAULT_ENTITY_CONTEXT,
-    keywordPatterns
+    similarityThreshold,
+    maxMemories,
+    injectProfile,
+    entityContext
   };
 }
 
@@ -13883,8 +13907,6 @@ var SAVE_NUDGE = `[MEMORY TRIGGER DETECTED]
 The user wants you to remember something. Use the \`supermemory\` tool with \`mode: "add"\` to save this information.
 
 Extract the key information and save it as a concise, searchable memory.
-- Use \`scope: "user"\` for personal preferences (cross-project)
-- Use \`scope: "project"\` for project-specific knowledge
 
 DO NOT skip this step. The user explicitly asked you to remember.`;
 function extractFactText(fact) {
@@ -13932,15 +13954,36 @@ Relevant Memories:`);
 }
 var SupermemoryRedux = async (ctx) => {
   const { client } = ctx;
+  let lastErrorNoticeAt = 0;
+  const notifyError = async (message, throttle = true) => {
+    const now = Date.now();
+    if (throttle && now - lastErrorNoticeAt < 30000)
+      return;
+    lastErrorNoticeAt = now;
+    const visibleMessage = message.length > 500 ? `${message.slice(0, 497)}...` : message;
+    try {
+      await client.tui.showToast({
+        body: {
+          title: "Supermemory Redux",
+          message: visibleMessage,
+          variant: "error",
+          duration: 1e4
+        },
+        query: { directory: ctx.directory }
+      });
+    } catch {}
+  };
   let config2;
   try {
     config2 = loadConfig();
   } catch (e) {
+    const message = `Configuration failed: ${e instanceof Error ? e.message : String(e)}`;
+    await notifyError(message, false);
     await client.app.log({
       body: {
         service: "oc-supermemory-redux",
         level: "error",
-        message: `Config load failed: ${e instanceof Error ? e.message : String(e)}`
+        message
       }
     });
     return {};
@@ -13949,6 +13992,40 @@ var SupermemoryRedux = async (ctx) => {
     apiKey: config2.apiKey,
     baseURL: config2.baseUrl
   });
+  let entityContextSynced = false;
+  const syncEntityContext = async () => {
+    if (entityContextSynced)
+      return;
+    const response = await fetch(`${config2.baseUrl.replace(/\/$/, "")}/v3/container-tags/${encodeURIComponent(config2.containerTag)}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${config2.apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ entityContext: config2.entityContext })
+    });
+    if (response.status === 404)
+      return;
+    if (!response.ok) {
+      throw new Error(`Entity context synchronization failed (${response.status}): ${await response.text()}`);
+    }
+    entityContextSynced = true;
+  };
+  const trySyncEntityContext = async () => {
+    try {
+      await syncEntityContext();
+    } catch (error45) {
+      const message = error45 instanceof Error ? error45.message : String(error45);
+      await notifyError(message);
+      await client.app.log({
+        body: {
+          service: "oc-supermemory-redux",
+          level: "error",
+          message
+        }
+      });
+    }
+  };
   await client.app.log({
     body: {
       service: "oc-supermemory-redux",
@@ -13957,33 +14034,39 @@ var SupermemoryRedux = async (ctx) => {
       extra: { containerTag: config2.containerTag, baseUrl: config2.baseUrl }
     }
   });
+  await trySyncEntityContext();
   const ingestedMessageIds = new Set;
   const profiledSessions = new Set;
   return {
     "chat.message": async (input, output) => {
-      try {
-        const textParts = output.parts.filter((p) => p.type === "text");
-        if (textParts.length === 0)
-          return;
-        const userMessage = textParts.map((p) => p.text).join(`
+      const textParts = output.parts.filter((p) => p.type === "text");
+      if (textParts.length === 0)
+        return;
+      const userMessage = textParts.map((p) => p.text).join(`
 `);
-        if (!userMessage.trim())
-          return;
-        if (KEYWORD_PATTERN.test(userMessage)) {
-          output.parts.push({
-            id: `prt_sm-nudge-${Date.now()}`,
-            sessionID: input.sessionID,
-            messageID: output.message.id,
-            type: "text",
-            text: SAVE_NUDGE,
-            synthetic: true
-          });
-        }
+      if (!userMessage.trim())
+        return;
+      if (KEYWORD_PATTERN.test(userMessage)) {
+        output.parts.push({
+          id: `prt_sm-nudge-${Date.now()}`,
+          sessionID: input.sessionID,
+          messageID: output.message.id,
+          type: "text",
+          text: SAVE_NUDGE,
+          synthetic: true
+        });
+      }
+      try {
         let profile = null;
         let searchResults = null;
         if (!profiledSessions.has(input.sessionID)) {
-          const result = await sm.profile({ containerTag: config2.containerTag });
+          const result = await sm.profile({
+            containerTag: config2.containerTag,
+            q: userMessage,
+            threshold: config2.similarityThreshold
+          });
           profile = result.profile ?? null;
+          searchResults = result.searchResults ?? null;
           profiledSessions.add(input.sessionID);
         } else {
           searchResults = await sm.search({
@@ -14005,84 +14088,88 @@ var SupermemoryRedux = async (ctx) => {
             synthetic: true
           });
         }
-        try {
-          const response = await ctx.client.session.messages({
-            path: { id: input.sessionID },
-            query: { directory: ctx.directory }
-          });
-          if (response.error) {
-            throw new Error(`OpenCode message retrieval failed: ${JSON.stringify(response.error)}`);
-          }
-          const msgs = response.data ?? [];
-          if (!ingestedMessageIds.has(output.message.id)) {
-            const previousAssistant = [...msgs].reverse().find((msg) => msg.info.role === "assistant");
-            const assistantText = previousAssistant?.parts.filter((p) => p.type === "text" && !p.synthetic).map((p) => p.text).join(`
-`).trim();
-            const conversationMessages = [];
-            if (assistantText)
-              conversationMessages.push({ role: "assistant", content: assistantText });
-            conversationMessages.push({ role: "user", content: userMessage });
-            const conversationResponse = await fetch(`${config2.baseUrl.replace(/\/$/, "")}/v4/conversations`, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${config2.apiKey}`,
-                "Content-Type": "application/json"
-              },
-              body: JSON.stringify({
-                conversationId: `session_${input.sessionID}`,
-                messages: conversationMessages,
-                containerTags: [config2.containerTag],
-                metadata: { type: "conversation", source: "opencode" }
-              })
-            });
-            if (!conversationResponse.ok) {
-              throw new Error(`Conversation ingestion failed (${conversationResponse.status}): ${await conversationResponse.text()}`);
-            }
-            ingestedMessageIds.add(output.message.id);
-            await client.app.log({
-              body: {
-                service: "oc-supermemory-redux",
-                level: "info",
-                message: "Conversation ingested on chat.message",
-                extra: {
-                  sessionID: input.sessionID,
-                  messageCount: conversationMessages.length,
-                  contentLength: JSON.stringify(conversationMessages).length,
-                  containerTag: config2.containerTag
-                }
-              }
-            });
-          }
-        } catch (ingestErr) {
-          await client.app.log({
-            body: {
-              service: "oc-supermemory-redux",
-              level: "warn",
-              message: `Turn ingestion skipped: ${ingestErr instanceof Error ? ingestErr.message : String(ingestErr)}`
-            }
-          });
-        }
       } catch (e) {
+        const message = `Memory recall failed: ${e instanceof Error ? e.message : String(e)}`;
+        await notifyError(message);
         await client.app.log({
           body: {
             service: "oc-supermemory-redux",
             level: "error",
-            message: `chat.message error: ${e instanceof Error ? e.message : String(e)}`
+            message
+          }
+        });
+      }
+      try {
+        const response = await ctx.client.session.messages({
+          path: { id: input.sessionID },
+          query: { directory: ctx.directory }
+        });
+        if (response.error) {
+          throw new Error(`OpenCode message retrieval failed: ${JSON.stringify(response.error)}`);
+        }
+        const msgs = response.data ?? [];
+        if (!ingestedMessageIds.has(output.message.id)) {
+          const previousAssistant = [...msgs].reverse().find((msg) => msg.info.role === "assistant");
+          const assistantText = previousAssistant?.parts.filter((p) => p.type === "text" && !p.synthetic).map((p) => p.text).join(`
+`).trim();
+          const conversationMessages = [];
+          if (assistantText)
+            conversationMessages.push({ role: "assistant", content: assistantText });
+          conversationMessages.push({ role: "user", content: userMessage });
+          const conversationResponse = await fetch(`${config2.baseUrl.replace(/\/$/, "")}/v4/conversations`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${config2.apiKey}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              conversationId: `session_${input.sessionID}`,
+              messages: conversationMessages,
+              containerTags: [config2.containerTag],
+              metadata: { source: "opencode" }
+            })
+          });
+          if (!conversationResponse.ok) {
+            throw new Error(`Conversation ingestion failed (${conversationResponse.status}): ${await conversationResponse.text()}`);
+          }
+          await trySyncEntityContext();
+          ingestedMessageIds.add(output.message.id);
+          await client.app.log({
+            body: {
+              service: "oc-supermemory-redux",
+              level: "info",
+              message: "Conversation ingested on chat.message",
+              extra: {
+                sessionID: input.sessionID,
+                messageCount: conversationMessages.length,
+                contentLength: JSON.stringify(conversationMessages).length,
+                containerTag: config2.containerTag
+              }
+            }
+          });
+        }
+      } catch (ingestErr) {
+        const message = `Conversation ingestion failed: ${ingestErr instanceof Error ? ingestErr.message : String(ingestErr)}`;
+        await notifyError(message);
+        await client.app.log({
+          body: {
+            service: "oc-supermemory-redux",
+            level: "warn",
+            message
           }
         });
       }
     },
     tool: {
       supermemory: tool({
-        description: "Manage and query the Supermemory persistent memory system. " + "Use 'search' to find relevant memories, 'add' to store new knowledge, " + "'profile' to view user profile, 'list' to see recent memories, " + "'forget' to remove a memory.",
+        description: "Manage and query the Supermemory persistent memory system. " + "Use 'search' to find relevant memories, 'add' to store new knowledge, " + "'update' to correct an existing memory, " + "'profile' to view user profile, 'list' to see recent documents, " + "'get' to retrieve a complete document, " + "'forget' to remove a memory.",
         args: {
-          mode: tool.schema.enum(["add", "search", "profile", "list", "forget"]).optional(),
+          mode: tool.schema.enum(["add", "update", "search", "profile", "list", "get", "forget"]).optional(),
           content: tool.schema.string().optional(),
+          newContent: tool.schema.string().optional(),
           query: tool.schema.string().optional(),
-          scope: tool.schema.enum(["user", "project"]).optional(),
-          type: tool.schema.enum(["direct", "document"]).optional(),
-          dreaming: tool.schema.enum(["dynamic", "instant"]).optional(),
           memoryId: tool.schema.string().optional(),
+          documentId: tool.schema.string().optional(),
           limit: tool.schema.number().optional()
         },
         async execute(args) {
@@ -14096,48 +14183,30 @@ var SupermemoryRedux = async (ctx) => {
                     error: "content is required for add mode"
                   });
                 }
-                if ((args.type ?? "direct") === "direct") {
-                  const response = await fetch(`${config2.baseUrl.replace(/\/$/, "")}/v4/memories`, {
-                    method: "POST",
-                    headers: {
-                      Authorization: `Bearer ${config2.apiKey}`,
-                      "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify({
-                      memories: [{
-                        content: args.content,
-                        isStatic: false,
-                        metadata: { type: "manual", scope: args.scope || "user", source: "opencode" }
-                      }],
-                      containerTag: config2.containerTag
-                    })
-                  });
-                  if (!response.ok) {
-                    throw new Error(`Direct memory creation failed (${response.status}): ${await response.text()}`);
-                  }
-                  const result2 = await response.json();
-                  return JSON.stringify({
-                    success: true,
-                    id: result2.memories[0]?.id,
-                    documentId: result2.documentId,
-                    type: "direct",
+                const response = await fetch(`${config2.baseUrl.replace(/\/$/, "")}/v4/memories`, {
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${config2.apiKey}`,
+                    "Content-Type": "application/json"
+                  },
+                  body: JSON.stringify({
+                    memories: [{
+                      content: args.content,
+                      isStatic: false,
+                      metadata: { source: "opencode" }
+                    }],
                     containerTag: config2.containerTag
-                  });
-                }
-                const result = await sm.add({
-                  content: args.content,
-                  containerTag: config2.containerTag,
-                  customId: `manual_${Date.now()}`,
-                  metadata: { type: "manual", scope: args.scope || "user", source: "opencode" },
-                  entityContext: config2.entityContext,
-                  dreaming: args.dreaming ?? "dynamic"
+                  })
                 });
+                if (!response.ok) {
+                  throw new Error(`Direct memory creation failed (${response.status}): ${await response.text()}`);
+                }
+                await trySyncEntityContext();
+                const result = await response.json();
                 return JSON.stringify({
                   success: true,
-                  id: result.id,
-                  status: result.status,
-                  type: "document",
-                  dreaming: args.dreaming ?? "dynamic",
+                  id: result.memories[0]?.id,
+                  documentId: result.documentId,
                   containerTag: config2.containerTag
                 });
               }
@@ -14167,6 +14236,28 @@ var SupermemoryRedux = async (ctx) => {
                   }))
                 });
               }
+              case "update": {
+                if (!args.memoryId || !args.newContent) {
+                  return JSON.stringify({
+                    success: false,
+                    error: "memoryId and newContent are required for update mode"
+                  });
+                }
+                const result = await sm.memories.updateMemory({
+                  id: args.memoryId,
+                  newContent: args.newContent,
+                  containerTag: config2.containerTag
+                });
+                return JSON.stringify({
+                  success: true,
+                  id: result.id,
+                  memory: result.memory,
+                  parentMemoryId: result.parentMemoryId,
+                  rootMemoryId: result.rootMemoryId,
+                  version: result.version,
+                  createdAt: result.createdAt
+                });
+              }
               case "profile": {
                 const result = await sm.profile({
                   containerTag: config2.containerTag,
@@ -14185,7 +14276,6 @@ var SupermemoryRedux = async (ctx) => {
                 const result = await sm.documents.list({
                   containerTags: [config2.containerTag],
                   limit: args.limit || 20,
-                  includeContent: true,
                   sort: "createdAt",
                   order: "desc"
                 });
@@ -14194,9 +14284,41 @@ var SupermemoryRedux = async (ctx) => {
                   count: result.memories.length,
                   memories: result.memories.map((d) => ({
                     id: d.id,
-                    content: d.content?.slice(0, 200),
-                    createdAt: d.createdAt
+                    customId: d.customId,
+                    title: d.title,
+                    summary: d.summary,
+                    type: d.type,
+                    status: d.status,
+                    createdAt: d.createdAt,
+                    updatedAt: d.updatedAt
                   }))
+                });
+              }
+              case "get": {
+                if (!args.documentId) {
+                  return JSON.stringify({
+                    success: false,
+                    error: "documentId is required for get mode"
+                  });
+                }
+                const document = await sm.documents.get(args.documentId);
+                return JSON.stringify({
+                  success: true,
+                  document: {
+                    id: document.id,
+                    customId: document.customId,
+                    title: document.title,
+                    summary: document.summary,
+                    type: document.type,
+                    status: document.status,
+                    content: document.content,
+                    source: document.source,
+                    url: document.url,
+                    filepath: document.filepath,
+                    metadata: document.metadata,
+                    createdAt: document.createdAt,
+                    updatedAt: document.updatedAt
+                  }
                 });
               }
               case "forget": {
@@ -14233,10 +14355,12 @@ var SupermemoryRedux = async (ctx) => {
                   message: "Supermemory Redux Usage Guide",
                   containerTag: config2.containerTag,
                   commands: [
-                    { command: "add", description: "Store a new memory", args: ["content", "scope?", "type?", "dreaming?"] },
+                    { command: "add", description: "Store a new memory", args: ["content"] },
+                    { command: "update", description: "Correct an existing memory", args: ["memoryId", "newContent"] },
                     { command: "search", description: "Search memories (hybrid mode)", args: ["query", "limit?"] },
                     { command: "profile", description: "View user profile", args: ["query?"] },
                     { command: "list", description: "List recent documents", args: ["limit?"] },
+                    { command: "get", description: "Retrieve a complete document", args: ["documentId"] },
                     { command: "forget", description: "Remove a memory", args: ["memoryId?", "content?"] }
                   ]
                 });
