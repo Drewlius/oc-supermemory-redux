@@ -153,6 +153,7 @@ export const SupermemoryRedux: Plugin = async (ctx: PluginInput) => {
 
   const ingestedMessageIds = new Set<string>();
   const profiledSessions = new Set<string>();
+  const sessionModels = new Map<string, string>();
 
   return {
     "chat.message": async (input, output) => {
@@ -163,6 +164,8 @@ export const SupermemoryRedux: Plugin = async (ctx: PluginInput) => {
 
       const userMessage = textParts.map((p) => p.text).join("\n");
       if (!userMessage.trim()) return;
+
+      if (input.model?.modelID) sessionModels.set(input.sessionID, input.model.modelID);
 
       if (KEYWORD_PATTERN.test(userMessage)) {
         output.parts.push({
@@ -246,8 +249,14 @@ export const SupermemoryRedux: Plugin = async (ctx: PluginInput) => {
               .map((p) => p.text)
               .join("\n")
               .trim();
+            const turnModel = (previousAssistant?.info as { modelID?: string } | undefined)?.modelID;
+            const assistantContent = assistantText
+              ? turnModel
+                ? `[model: ${turnModel}]\n${assistantText}`
+                : assistantText
+              : undefined;
             const conversationMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
-            if (assistantText) conversationMessages.push({ role: "assistant", content: assistantText });
+            if (assistantContent) conversationMessages.push({ role: "assistant", content: assistantContent });
             conversationMessages.push({ role: "user", content: userMessage });
 
             const conversationResponse = await fetch(`${config.baseUrl.replace(/\/$/, "")}/v4/conversations`, {
@@ -260,7 +269,10 @@ export const SupermemoryRedux: Plugin = async (ctx: PluginInput) => {
                 conversationId: `session_${input.sessionID}`,
                 messages: conversationMessages,
                 containerTags: [config.containerTag],
-                metadata: { source: "opencode" },
+                metadata: {
+                  source: "opencode",
+                  model: input.model?.modelID,
+                },
               }),
             });
             if (!conversationResponse.ok) {
@@ -318,6 +330,7 @@ export const SupermemoryRedux: Plugin = async (ctx: PluginInput) => {
           memoryId: tool.schema.string().optional(),
           documentId: tool.schema.string().optional(),
           limit: tool.schema.number().optional(),
+          reason: tool.schema.string().optional(),
         },
         async execute(args: {
           mode?: string;
@@ -327,8 +340,10 @@ export const SupermemoryRedux: Plugin = async (ctx: PluginInput) => {
           memoryId?: string;
           documentId?: string;
           limit?: number;
-        }) {
+          reason?: string;
+        }, context: { sessionID: string }) {
           const mode = args.mode || "help";
+          const toolModel = sessionModels.get(context.sessionID);
 
           try {
             switch (mode) {
@@ -350,8 +365,12 @@ export const SupermemoryRedux: Plugin = async (ctx: PluginInput) => {
                     memories: [{
                       content: args.content,
                       isStatic: false,
-                      metadata: { source: "opencode" },
-                    }],
+                      metadata: {
+                        source: "opencode",
+                        ...(toolModel ? { model: toolModel } : {}),
+                      },
+                    },
+                  ],
                     containerTag: config.containerTag,
                   }),
                 });
@@ -384,7 +403,7 @@ export const SupermemoryRedux: Plugin = async (ctx: PluginInput) => {
                 const results = await sm.search({
                   q: args.query,
                   containerTag: config.containerTag,
-                  searchMode: "hybrid",
+                  searchMode: "memories",
                   limit: args.limit || config.maxMemories,
                   threshold: config.similarityThreshold,
                 });
@@ -422,6 +441,10 @@ export const SupermemoryRedux: Plugin = async (ctx: PluginInput) => {
                   id: args.memoryId,
                   newContent: args.newContent,
                   containerTag: config.containerTag,
+                  metadata: {
+                    source: "opencode",
+                    ...(toolModel ? { model: toolModel } : {}),
+                  },
                 });
 
                 return JSON.stringify({
@@ -521,6 +544,7 @@ export const SupermemoryRedux: Plugin = async (ctx: PluginInput) => {
                   result = await sm.memories.forget({
                     ...(args.memoryId ? { id: args.memoryId } : { content: args.content }),
                     containerTag: config.containerTag,
+                    ...(args.reason ? { reason: args.reason } : {}),
                   });
                 } catch (error) {
                   const isNotFound = error instanceof Error && error.message.includes("404");
@@ -528,6 +552,7 @@ export const SupermemoryRedux: Plugin = async (ctx: PluginInput) => {
                   result = await sm.memories.forget({
                     content: args.content,
                     containerTag: config.containerTag,
+                    ...(args.reason ? { reason: args.reason } : {}),
                   });
                 }
 
@@ -550,7 +575,7 @@ export const SupermemoryRedux: Plugin = async (ctx: PluginInput) => {
                     { command: "profile", description: "View user profile", args: ["query?"] },
                     { command: "list", description: "List recent documents", args: ["limit?"] },
                     { command: "get", description: "Retrieve a complete document", args: ["documentId"] },
-                    { command: "forget", description: "Remove a memory", args: ["memoryId?", "content?"] },
+                    { command: "forget", description: "Remove a memory", args: ["memoryId?", "content?", "reason?"] },
                   ],
                 });
             }
