@@ -14037,6 +14037,7 @@ var SupermemoryRedux = async (ctx) => {
   await trySyncEntityContext();
   const ingestedMessageIds = new Set;
   const profiledSessions = new Set;
+  const sessionModels = new Map;
   return {
     "chat.message": async (input, output) => {
       const textParts = output.parts.filter((p) => p.type === "text");
@@ -14046,6 +14047,8 @@ var SupermemoryRedux = async (ctx) => {
 `);
       if (!userMessage.trim())
         return;
+      if (input.model?.modelID)
+        sessionModels.set(input.sessionID, input.model.modelID);
       if (KEYWORD_PATTERN.test(userMessage)) {
         output.parts.push({
           id: `prt_sm-nudge-${Date.now()}`,
@@ -14112,9 +14115,12 @@ var SupermemoryRedux = async (ctx) => {
           const previousAssistant = [...msgs].reverse().find((msg) => msg.info.role === "assistant");
           const assistantText = previousAssistant?.parts.filter((p) => p.type === "text" && !p.synthetic).map((p) => p.text).join(`
 `).trim();
+          const turnModel = previousAssistant?.info?.modelID;
+          const assistantContent = assistantText ? turnModel ? `[model: ${turnModel}]
+${assistantText}` : assistantText : undefined;
           const conversationMessages = [];
-          if (assistantText)
-            conversationMessages.push({ role: "assistant", content: assistantText });
+          if (assistantContent)
+            conversationMessages.push({ role: "assistant", content: assistantContent });
           conversationMessages.push({ role: "user", content: userMessage });
           const conversationResponse = await fetch(`${config2.baseUrl.replace(/\/$/, "")}/v4/conversations`, {
             method: "POST",
@@ -14126,7 +14132,10 @@ var SupermemoryRedux = async (ctx) => {
               conversationId: `session_${input.sessionID}`,
               messages: conversationMessages,
               containerTags: [config2.containerTag],
-              metadata: { source: "opencode" }
+              metadata: {
+                source: "opencode",
+                model: input.model?.modelID
+              }
             })
           });
           if (!conversationResponse.ok) {
@@ -14170,10 +14179,12 @@ var SupermemoryRedux = async (ctx) => {
           query: tool.schema.string().optional(),
           memoryId: tool.schema.string().optional(),
           documentId: tool.schema.string().optional(),
-          limit: tool.schema.number().optional()
+          limit: tool.schema.number().optional(),
+          reason: tool.schema.string().optional()
         },
-        async execute(args) {
+        async execute(args, context) {
           const mode = args.mode || "help";
+          const toolModel = sessionModels.get(context.sessionID);
           try {
             switch (mode) {
               case "add": {
@@ -14190,11 +14201,16 @@ var SupermemoryRedux = async (ctx) => {
                     "Content-Type": "application/json"
                   },
                   body: JSON.stringify({
-                    memories: [{
-                      content: args.content,
-                      isStatic: false,
-                      metadata: { source: "opencode" }
-                    }],
+                    memories: [
+                      {
+                        content: args.content,
+                        isStatic: false,
+                        metadata: {
+                          source: "opencode",
+                          ...toolModel ? { model: toolModel } : {}
+                        }
+                      }
+                    ],
                     containerTag: config2.containerTag
                   })
                 });
@@ -14220,7 +14236,7 @@ var SupermemoryRedux = async (ctx) => {
                 const results = await sm.search({
                   q: args.query,
                   containerTag: config2.containerTag,
-                  searchMode: "hybrid",
+                  searchMode: "memories",
                   limit: args.limit || config2.maxMemories,
                   threshold: config2.similarityThreshold
                 });
@@ -14246,7 +14262,11 @@ var SupermemoryRedux = async (ctx) => {
                 const result = await sm.memories.updateMemory({
                   id: args.memoryId,
                   newContent: args.newContent,
-                  containerTag: config2.containerTag
+                  containerTag: config2.containerTag,
+                  metadata: {
+                    source: "opencode",
+                    ...toolModel ? { model: toolModel } : {}
+                  }
                 });
                 return JSON.stringify({
                   success: true,
@@ -14332,7 +14352,8 @@ var SupermemoryRedux = async (ctx) => {
                 try {
                   result = await sm.memories.forget({
                     ...args.memoryId ? { id: args.memoryId } : { content: args.content },
-                    containerTag: config2.containerTag
+                    containerTag: config2.containerTag,
+                    ...args.reason ? { reason: args.reason } : {}
                   });
                 } catch (error45) {
                   const isNotFound = error45 instanceof Error && error45.message.includes("404");
@@ -14340,7 +14361,8 @@ var SupermemoryRedux = async (ctx) => {
                     throw error45;
                   result = await sm.memories.forget({
                     content: args.content,
-                    containerTag: config2.containerTag
+                    containerTag: config2.containerTag,
+                    ...args.reason ? { reason: args.reason } : {}
                   });
                 }
                 return JSON.stringify({
@@ -14361,7 +14383,7 @@ var SupermemoryRedux = async (ctx) => {
                     { command: "profile", description: "View user profile", args: ["query?"] },
                     { command: "list", description: "List recent documents", args: ["limit?"] },
                     { command: "get", description: "Retrieve a complete document", args: ["documentId"] },
-                    { command: "forget", description: "Remove a memory", args: ["memoryId?", "content?"] }
+                    { command: "forget", description: "Remove a memory", args: ["memoryId?", "content?", "reason?"] }
                   ]
                 });
             }
