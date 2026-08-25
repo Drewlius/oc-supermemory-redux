@@ -151,3 +151,6 @@ The build produces the self-contained `dist/index.js` bundle. Keep the top-level
 - Added strict configuration validation and visible failure notifications.
 - Synchronized entity context through the container-settings endpoint.
 - Separated recall failures from conversation-ingestion failures.
+
+# Post Patch Notes, Notes - API Endpoint ```v4/conversations``` Changes
+- SuperMemory API provider has enabled "Dreaming" on the v4/conversations endpoint by default. This Plugin Follows that default and currently has no way to switch to "instant" mode. The "Dreaming" mode allows delayed inference of memories stored by the embeddings model. This should allow the embedded memories to be more accurate as the conversation with the agent develops over time.
