@@ -74,6 +74,13 @@ Create `supermemory.jsonc` in your OpenCode configuration directory:
 }
 ```
 
+- `containerTag`: REQUIRED - alphanumerical characters (NO DEFAULT)
+- `similarityThreshold`: OPTIONAL - number from 0 to 1 (DEFAULT = 0.6)
+- `maxMemories`: OPTIONAL - integer from 1 to 100 (DEFAULT = 3)
+- `injectProfile`: OPTIONAL - boolean (DEFAULT = true)
+- `baseUrl`: valid HTTP or HTTPS URL the api endpoint (DEFAULT = SUPERMEMORY HOSTED API ENDPOINT)
+- `entityContext`: OPTIONAL: maximum 1,500 characters (DEFAULT = SEE BELOW ⌄)
+
 The optional `entityContext` setting accepts a string up to 1,500 characters. If omitted, the plugin uses its built-in coding-agent context and synchronizes it with the configured container.
 
 ### API Key Resolution
@@ -84,16 +91,9 @@ The first available API key is used:
 2. `apiKey` in `supermemory.jsonc`
 3. `apiKey` in `supermemory-credentials.json`
 
-Both configuration files belong in the OpenCode configuration directory. The plugin does not inspect configuration belonging to Claude, Codex, Cursor, or other applications.
+configuration files belong in the top level of the OpenCode configuration directory. The plugin does not inspect configuration belonging to Claude, Codex, Cursor, or other applications.
 
 Invalid JSON, missing credentials, unsupported values, and unreachable back-end services produce a visible error toast in OpenCode. Configuration validation includes:
-
-- `containerTag`: 1-100 supported characters
-- `similarityThreshold`: number from 0 to 1
-- `maxMemories`: integer from 1 to 100
-- `injectProfile`: boolean
-- `entityContext`: maximum 1,500 characters
-- `baseUrl`: valid HTTP or HTTPS URL
 
 ## <div align="center"> How It Works
 ---
@@ -102,7 +102,7 @@ Invalid JSON, missing credentials, unsupported values, and unreachable back-end 
 
 On the first user message for a session, the plugin calls `/v4/profile` with the user's message as the query. The response provides the static and dynamic profile plus query-specific search results in one request.
 
-Later messages call `/v4/search` in memories mode using the configured threshold and result limit. Retrieved context is injected as a synthetic `[SUPERMEMORY]` block.
+Later messages call `/v4/search` in memories mode using the configured threshold and result limit. Retrieved context is injected as a synthetic `[SUPEREMORY]` block.
 
 ### Conversation Ingestion
 
@@ -146,11 +146,10 @@ The build produces the self-contained `dist/index.js` bundle. Keep the top-level
 ## Patch Notes
 
 - Aligned profile, memory, container settings, and conversation behavior with current Supermemory APIs and SDK types.
-- Removed legacy scope, dreaming, metadata-routing, configurable-keyword, and manual document-ingestion paths.
 - Added direct memory update and complete document retrieval tools.
 - Added strict configuration validation and visible failure notifications.
 - Synchronized entity context through the container-settings endpoint.
 - Separated recall failures from conversation-ingestion failures.
 
 # Post Patch Notes, Notes - API Endpoint ```v4/conversations``` Changes
-- SuperMemory API provider has enabled "Dreaming" on the v4/conversations endpoint by default. This Plugin Follows that default and currently has no way to switch to "instant" mode. The "Dreaming" mode allows delayed inference of memories stored by the embeddings model. This should allow the embedded memories to be more accurate as the conversation with the agent develops over time.
+- SuperMemory API provider has enabled "Dreaming" on the v4/conversations endpoint by default. This Plugin Follows that default and currently has no way to switch to "instant" mode. The "Dreaming" mode allows delayed inference of memories stored by the embeddings model. This SHOULD allow the embedded memories to be more accurate as the conversation with the agent develops over time.
