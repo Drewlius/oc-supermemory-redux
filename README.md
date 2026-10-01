@@ -1,4 +1,4 @@
-# oc-supermemory-redux
+# superMemory-Redux_OpenCode
 
 A focused [Supermemory](https://supermemory.ai/docs) plugin for OpenCode. It follows the current API contracts without legacy cross-editor tag discovery, custom compaction handling, or version-check banners.
 
@@ -21,13 +21,13 @@ OpenCode loads local plugins from its `plugins` configuration directory. The def
 
 ### Prebuilt Plugin
 
-The repository includes a self-contained `supermemory-redux.js` bundle, so Bun is not required.
+The repository includes a self-contained `superMemory-Redux_OpenCode.js` bundle, so Bun is not required.
 
 ```sh
 mkdir -p "~/.config/opencode/plugins"
 curl -fsSL \
-  https://raw.githubusercontent.com/Drewlius/oc-supermemory-redux/main/supermemory-redux.js \
-  -o "~/.config/opencode/plugins/supermemory-redux.js"
+  https://raw.githubusercontent.com/Drewlius/superMemory-Redux_OpenCode/main/superMemory-Redux_OpenCode.js \
+  -o "~/.config/opencode/plugins/superMemory-Redux_OpenCode.js"
 ```
 
 Create the [configuration file](#configuration) at:
@@ -41,13 +41,13 @@ No entry in `opencode.jsonc` is required. OpenCode automatically discovers JavaS
 ### Build From Source
 
 ```sh
-git clone https://github.com/Drewlius/oc-supermemory-redux.git
-cd oc-supermemory-redux
+git clone https://github.com/Drewlius/superMemory-Redux_OpenCode_OpenCode.git
+cd superMemory-Redux_OpenCode_OpenCode
 bun install --frozen-lockfile
 bun run typecheck
 bun run build
 mkdir -p "~/.config/opencode/plugins"
-cp ./dist/index.js "~/.config/opencode/plugins/supermemory-redux.js"
+cp ./dist/index.js "~/.config/opencode/plugins/superMemory-Redux_OpenCode.js"
 ```
 
 Then create the [configuration file](#configuration) at `~/.config/opencode/supermemory.jsonc`, or directly inside `OPENCODE_CONFIG_DIR` when that override is set.
@@ -86,7 +86,7 @@ The first available API key is used:
 
 Both configuration files belong in the OpenCode configuration directory. The plugin does not inspect configuration belonging to Claude, Codex, Cursor, or other applications.
 
-Invalid JSON, missing credentials, unsupported values, and unreachable back-end services produce a visible error toast in OpenCode. Configuration validation includes:
+Invalid JSON, missing credentials, unsupported values, and unreachable back-end services produce console errors in OpenCode.log. Configuration validation includes:
 
 - `containerTag`: 1-100 supported characters
 - `similarityThreshold`: number from 0 to 1
@@ -141,13 +141,12 @@ bun run typecheck
 bun run build
 ```
 
-The build produces the self-contained `dist/index.js` bundle. Keep the top-level `supermemory-redux.js` release artifact synchronized with that file.
+The build produces the self-contained `dist/index.js` bundle. Keep the top-level `superMemory-Redux_OpenCode.js` release artifact synchronized with that file.
 
 ## Patch Notes
 
-- Aligned profile, memory, container settings, and conversation behavior with current Supermemory APIs and SDK types.
-- Removed legacy scope, dreaming, metadata-routing, configurable-keyword, and manual document-ingestion paths.
-- Added direct memory update and complete document retrieval tools.
-- Added strict configuration validation and visible failure notifications.
-- Synchronized entity context through the container-settings endpoint.
-- Separated recall failures from conversation-ingestion failures.
+- Migrated plugin to OpenCode V ^2.0 specification.
+- Toast error notifications are now gone and currently we are only logging errors/success through console.log
+- Memory injection is fully visible in the user space now you can fully verify what memories the model got or if they got them at all.
+- all supermemory sub commands: search, add, forget, update, list, get, docs, ect. now have individual mappings with a deeper explanation of their use case so your agent can more intelligently decide what tool to use and when to use it.
+- removed fallback strip to the profile and memories so it is important  to not set that too high now as we provide no defense against you injecting 20 or more memories per search query. 
