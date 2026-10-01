@@ -1,4 +1,4 @@
-# superMemory-Redux_OpenCode_OpenCode
+# superMemory-Redux_OpenCode
 
 A focused [Supermemory](https://supermemory.ai/docs) plugin for OpenCode. It follows the current API contracts without legacy cross-editor tag discovery, custom compaction handling, or version-check banners.
 
@@ -26,7 +26,7 @@ The repository includes a self-contained `superMemory-Redux_OpenCode.js` bundle,
 ```sh
 mkdir -p "~/.config/opencode/plugins"
 curl -fsSL \
-  https://raw.githubusercontent.com/Drewlius/superMemory-Redux_OpenCode_OpenCode/main/superMemory-Redux_OpenCode.js \
+  https://raw.githubusercontent.com/Drewlius/superMemory-Redux_OpenCode/main/superMemory-Redux_OpenCode.js \
   -o "~/.config/opencode/plugins/superMemory-Redux_OpenCode.js"
 ```
 
