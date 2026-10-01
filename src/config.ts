@@ -10,6 +10,10 @@ export interface Config {
   maxMemories: number;
   injectProfile: boolean;
   entityContext: string;
+  rerank: boolean;
+  rewriteQuery: boolean;
+  aggregate: boolean;
+  includeSummaries: boolean;
 }
 
 const DEFAULT_BASE_URL = "https://api.supermemory.ai";
@@ -195,6 +199,26 @@ export function loadConfig(): Config {
     throw new Error("entityContext must be a string no longer than 1500 characters");
   }
 
+  const rerank = fileConfig?.rerank ?? false;
+  if (typeof rerank !== "boolean") {
+    throw new Error("rerank must be a boolean");
+  }
+
+  const rewriteQuery = fileConfig?.rewriteQuery ?? false;
+  if (typeof rewriteQuery !== "boolean") {
+    throw new Error("rewriteQuery must be a boolean");
+  }
+
+  const aggregate = fileConfig?.aggregate ?? false;
+  if (typeof aggregate !== "boolean") {
+    throw new Error("aggregate must be a boolean");
+  }
+
+  const includeSummaries = fileConfig?.includeSummaries ?? false;
+  if (typeof includeSummaries !== "boolean") {
+    throw new Error("includeSummaries must be a boolean");
+  }
+
   return {
     apiKey,
     baseUrl: parsedBaseUrl.toString().replace(/\/$/, ""),
@@ -203,5 +227,9 @@ export function loadConfig(): Config {
     maxMemories: maxMemories as number,
     injectProfile,
     entityContext,
+    rerank,
+    rewriteQuery,
+    aggregate,
+    includeSummaries,
   };
 }

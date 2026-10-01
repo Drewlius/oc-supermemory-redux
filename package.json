@@ -12,12 +12,12 @@
   "keywords": ["opencode", "supermemory", "plugin", "memory"],
   "license": "MIT",
   "dependencies": {
-    "@opencode-ai/plugin": "^1.0.162",
+    "@opencode/plugin": "latest",
     "supermemory": "^4.0.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.2",
-    "typescript": "^5.7.3"
+    "@types/bun": "latest",
+    "typescript": "latest"
   },
   "opencode": {
     "type": "plugin",
