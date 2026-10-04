@@ -166,7 +166,7 @@ export function loadConfig(): Config {
   try {
     parsedBaseUrl = new URL(baseUrl);
   } catch {
-    throw new Error("baseUrl must be a valid URL");
+    parsedBaseUrl = new URL(`http://${baseUrl}`);
   }
   if (parsedBaseUrl.protocol !== "http:" && parsedBaseUrl.protocol !== "https:") {
     throw new Error("baseUrl must use http or https");
@@ -183,7 +183,7 @@ export function loadConfig(): Config {
   }
 
   const maxMemories = fileConfig?.maxMemories ?? 3;
-  if (!Number.isInteger(maxMemories) || (maxMemories as number) < 1 || (maxMemories as number) > 100) {
+if (typeof maxMemories !== "number" || !Number.isInteger(maxMemories) || maxMemories < 1 || maxMemories > 100) {
     throw new Error("maxMemories must be an integer between 1 and 100");
   }
 
@@ -222,7 +222,7 @@ export function loadConfig(): Config {
     baseUrl: parsedBaseUrl.toString().replace(/\/$/, ""),
     containerTag,
     similarityThreshold,
-    maxMemories: maxMemories as number,
+    maxMemories,
     injectProfile,
     entityContext,
     rerank,

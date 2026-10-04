@@ -171,9 +171,6 @@ export default Plugin.define({
           if (KEYWORD_PATTERN.test(userMessage)) {
             event.prompt.text = `${userMessage}\n\n${SAVE_NUDGE}`;
           }
-
-
-
           try {
             const sessionID = event.sessionID;
             const ingestKey = `${sessionID}:${userMessage}`;
@@ -218,373 +215,367 @@ export default Plugin.define({
           } catch (ingestErr) {
             const message = `Conversation ingestion failed: ${ingestErr instanceof Error ? ingestErr.message : String(ingestErr)}`;
             await notifyError(message, true);
-          };
-                await ctx.tool.transform((editor) => {
-                  editor.add({
-                    name: "search",
-                    description: "Search Supermemory for relevant memories. Requires query, others are optional.",
+        };
+        await ctx.tool.transform((editor) => {
+          editor.add({
+            name: "search",
+            description: "Search Supermemory for relevant memories. Requires query, others are optional.",
+            input: {
+              type: "object",
+              properties: {
+                query: {
+                  type: "string",
+                  description: "Search query text"
+                },
+                limit: {
+                  type: "number",
+                  description: "Max memories to return"
+                },
+                rerank: {
+                  type: "boolean",
+                  description: "Rerank by relevance"
+                },
+                rewriteQuery: {
+                  type: "boolean",
+                  description: "Rewrite query for better recall, adds latency"
+                },
+                aggregate: {
+                  type: "boolean",
+                  description: "If true, aggregates information from multiple memories to create new synthesized memories."
+                },
+                summaries: {
+                  type: "boolean",
+                  description: "Include document summaries"
+                }
+              },
+              required: ["query"],
+              additionalProperties: false
+            },
+            options: {
+              namespace: "supermemory"
+            },
+            execute: async (input, _tool) => {
+              const args = input as {
+                query: string;limit ? : number;rerank ? : boolean;rewriteQuery ? : boolean;summaries ? : boolean;aggregate ? : boolean;
+              };
+              const results = await sm.search({
+                q: args.query,
+                containerTag: config.containerTag,
+                searchMode: "hybrid",
+                limit: args.limit ?? config.maxMemories,
+                threshold: config.similarityThreshold,
+                rerank: args.rerank ?? config.rerank,
+                rewriteQuery: args.rewriteQuery ?? config.rewriteQuery,
+                aggregate: args.aggregate ?? config.aggregate,
+                include: {
+                  summaries: args.summaries ?? config.includeSummaries
+                },
+              });
+              return {
+                content: JSON.stringify({
+                  success: true,
+                  results
+                })
+              };
+            },
+          });
+        });
+        await ctx.tool.transform((editor) => {
+        editor.add({
+          name: "add",
+          description: "Ingest content into memory supports Text string, file path, or URL",
+          input: {
+            type: "object",
+            properties: {
+              content: {
+                type: "string",
+                description: "The content to extract and process into a document. This can be a URL, website, PDF, image, or video"
+              },
+              filepath: {
+                type: "string",
+                description: "Optional filepath Used by SuperMemory to store the full path of the file."
+              },
+              metadata: {
+                type: "object",
+                description: "optional metadata",
+                additionalProperties: {
+                  type: ["string", "number", "boolean", "array"]
+                }
+              },
+              taskType: {
+                type: "string",
+                enum: ["memory", "superrag"],
+                description: "Task type: memory (default) for full context layer with SuperRAG built in, superrag for managed RAG as a service."
+              }
+            },
+            required: ["content"],
+            additionalProperties: false
+          },
+          options: {
+            namespace: "supermemory"
+          },
+          execute: async (input, _tool) => {
+            const args = input as {
+              content: string;filepath ? : string;taskType ? : "memory" | "superrag";metadata ? : Record < string,
+              string | number | boolean | string[] >
+            };
+            const results = await sm.add({
+              containerTag: config.containerTag,
+              content: args.content,
+              filepath: args.filepath,
+              metadata: args.metadata,
+            });
+            return {
+              content: JSON.stringify({
+                success: true,
+                results
+              })
+            };
+          },
+        });
+      });
+        await ctx.tool.transform((editor) => {
+          editor.add({
+            name: "remember",
+            description: "Store an exact memory directly. Requires content. Use for explicit facts, not document ingestion.",
+            input: {
+              type: "object",
+              properties: {
+                content: {
+                  type: "string",
+                  description: "Exact memory text to store"
+                },
+                metadata: {
+                  type: "object",
+                  description: "Optional metadata",
+                  additionalProperties: {
+                    type: "string"
+                  }
+                }
+              },
+              required: ["content"],
+              additionalProperties: false
+            },
+            options: {
+              namespace: "supermemory"
+            },
+            execute: async (input, _tool) => {
+              const args = input as {
+                content: string;static ? : boolean;metadata ? : Record < string,
+                string | number | boolean | string[] >
+              };
+              const response = await fetch(`${config.baseUrl.replace(/\/$/, "")}/v4/memories`, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${config.apiKey}`,
+                  "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                  memories: [{
+                    content: args.content,
+                    isStatic: false,
+                    metadata: {
+                      source: "opencode",
+                      ...(args.metadata ?? {})
+                    }
+                  }],
+                  containerTag: config.containerTag
+                })
+              });
+              if (!response.ok) throw new Error(`Remember failed (${response.status}): ${await response.text()}`);
+              const result = await response.json();
+              return {
+                content: JSON.stringify({
+                  success: true,
+                  result
+                })
+              };
+            }
+          });
+        });
+        await ctx.tool.transform((editor) => {
+          editor.add({
+            name: "forget",
+            description: "Forget a memory. Requires memoryId or exact content. Optional reason.",
+            input: {
+              type: "object",
+              properties: {
+                memoryId: {
+                  type: "string",
+                  description: "Memory ID to forget"
+                },
+                content: {
+                  type: "string",
+                  description: "Exact content to forget when ID unknown"
+                },
+                reason: {
+                  type: "string",
+                  description: "Reason for forgetting"
+                }
+              },
+              required: [],
+                additionalProperties: false
+              },
+              options: {
+                namespace: "supermemory"
+              },
+              execute: async (input, _tool) => {
+                const args = input as {
+                  memoryId ? : string;
+                  content ? : string;
+                  reason ? : string
+                };
+                if (!args.memoryId && !args.content) throw new Error("memoryId or content is required");
+                const result = await sm.memories.forget({
+                  containerTag: config.containerTag,
+                  ...(args.memoryId ? {
+                    id: args.memoryId
+                  } : {
+                    content: args.content
+                  }),
+                  ...(args.reason ? {
+                    reason: args.reason
+                  } : {})
+                });
+                return {
+                  content: JSON.stringify({
+                    success: true,
+                    result
+                  })
+                };
+              },
+            });
+          });
+          await ctx.tool.transform((editor) => {
+            editor.add({
+              name: "update",
+              description: "Update a memory by creating a new version. Requires newContent plus memoryId or content.",
+              input: {
+                type: "object",
+                properties: {
+                  memoryId: {
+                    type: "string",
+                    description: "Memory ID to update"
+                  },
+                  content: {
+                    type: "string",
+                    description: "Exact content to match when ID unknown"
+                  },
+                  newContent: {
+                    type: "string",
+                    description: "Replacement content"
+                  }
+                },
+                required: ["newContent"],
+                additionalProperties: false
+              },
+              options: {
+                namespace: "supermemory"
+              },
+              execute: async (input, _tool) => {
+                const args = input as {
+                  memoryId ? : string;
+                  content ? : string;
+                  newContent: string
+                };
+                const result = await sm.memories.updateMemory({
+                  containerTag: config.containerTag,
+                  newContent: args.newContent,
+                  ...(args.memoryId ? {
+                    id: args.memoryId
+                  } : {}),
+                  ...(args.content ? {
+                    content: args.content
+                  } : {})
+                });
+                return {
+                  content: JSON.stringify({
+                    success: true,
+                    result
+                  })
+                };
+              }
+            });
+          });
+          await ctx.tool.transform((editor) => {
+            editor.add({
+              name: "list",
+              description: "Advanced browsing. List recent documents. Optional limit.",
+              input: {
+                type: "object",
+                properties: {
+                  limit: {
+                    type: "number",
+                    description: "Max documents to return"
+                  }
+                },
+                required: false,
+                additionalProperties: false
+              },
+              options: {
+                namespace: "supermemory"
+              },
+              execute: async (input, _tool) => {
+                const args = input as {
+                  limit ? : number
+                };
+                const result = await sm.documents.list({
+                  containerTags: [config.containerTag],
+                  limit: args.limit ?? 10,
+                  sort: "createdAt",
+                  order: "desc"
+                });
+                return {
+                  content: JSON.stringify({
+                    success: true,
+                    count: result.memories.length,
+                    memories: result.memories.map((d) => ({
+                      id: d.id,
+                      customId: d.customId,
+                      title: d.title,
+                      summary: d.summary,
+                      type: d.type,
+                      status: d.status,
+                      createdAt: d.createdAt,
+                      updatedAt: d.updatedAt
+                    }))
+                  })
+                };
+              }
+            });
+          });
+          await ctx.tool.transform((editor) => {
+              editor.add({
+                    name: "get",
+                    description: "Advanced browsing. Retrieve a full document by ID. Requires documentId.",
                     input: {
                       type: "object",
                       properties: {
-                        query: {
+                        documentId: {
                           type: "string",
-                          description: "Search query text"
-                        },
-                        limit: {
-                          type: "number",
-                          description: "Max memories to return"
-                        },
-                        rerank: {
-                          type: "boolean",
-                          description: "Rerank by relevance"
-                        },
-                        rewriteQuery: {
-                          type: "boolean",
-                          description: "Rewrite query for better recall, adds latency"
-                        },
-                        aggregate: {
-                          type: "boolean",
-                          description: "If true, aggregates information from multiple memories to create new synthesized memories."
-                        },
-                        summaries: {
-                          type: "boolean",
-                          description: "Include document summaries"
+                          description: "Document ID to retrieve"
                         }
                       },
-                      required: ["query"],
+                      required: "documentId",
                       additionalProperties: false
                     },
                     options: {
                       namespace: "supermemory"
                     },
-                    execute: async (input, _tool) => {
-                      const args = input as {
-                        query: string;limit ? : number;rerank ? : boolean;rewriteQuery ? : boolean;summaries ? : boolean;aggregate ? : boolean;
-                      };
-                      const results = await sm.search({
-                        q: args.query,
-                        containerTag: config.containerTag,
-                        searchMode: "hybrid",
-                        limit: args.limit ?? config.maxMemories,
-                        threshold: config.similarityThreshold,
-                        rerank: args.rerank ?? config.rerank,
-                        rewriteQuery: args.rewriteQuery ?? config.rewriteQuery,
-                        aggregate: args.aggregate ?? config.aggregate,
-                        include: {
-                          summaries: args.summaries ?? config.includeSummaries
-                        },
-                      });
-                      return {
-                        content: JSON.stringify({
-                          success: true,
-                          results
-                        })
-                      };
-                    },
+                    execute: async(input) => {
+                        const args = input as {
+                          documentId: string
+                        };
+                        const result = await sm.documents.get(args.documentId);
+                        return {
+                          content: JSON.stringify({
+                            success: true,
+                            result
+                          })
+                        };
+                      }
+                    });
                   });
-                });
-
-              await ctx.tool.transform((editor) => {
-                editor.add({
-                  name: "add",
-                  description: "Ingest content into memory supports Text string, file path, or URL",
-                  input: {
-                    type: "object",
-                    properties: {
-                      content: {
-                        type: "string",
-                        description: "The content to extract and process into a document. This can be a URL, website, PDF, image, or video"
-                      },
-                      filepath: {
-                        type: "string",
-                        description: "Optional filepath Used by SuperMemory to store the full path of the file."
-                      },
-                      metadata: {
-                        type: "object",
-                        description: "optional metadata",
-                        additionalProperties: {
-                          type: ["string", "number", "boolean", "array"]
-                        }
-                      },
-                      taskType: {
-                        type: "string",
-                        enum: ["memory", "superrag"],
-                        description: "Task type: memory (default) for full context layer with SuperRAG built in, superrag for managed RAG as a service."
-                      },
-                    },
-                    required: ["content"],
-                    additionalProperties: false
-                  },
-                  options: {
-                    namespace: "supermemory"
-                  },
-                  execute: async (input, _tool) => {
-                    const args = input as {
-                      content: string;filepath ? : string;taskType ? : "memory" | "superrag";metadata ? : Record < string,
-                      string | number | boolean | string[] >
-                    };
-                    const results = await sm.add({
-                      containerTag: config.containerTag,
-                      content: args.content,
-                      filepath: args.filepath,
-                      metadata: args.metadata,
-                    });
-                    return {
-                      content: JSON.stringify({
-                        success: true,
-                        results
-                      })
-                    };
-                  },
-                });
-              });
-
-              await ctx.tool.transform((editor) => {
-                editor.add({
-                  name: "remember",
-                  description: "Store an exact memory directly. Requires content. Use for explicit facts, not document ingestion.",
-                  input: {
-                    type: "object",
-                    properties: {
-                      content: {
-                        type: "string",
-                        description: "Exact memory text to store"
-                      },
-                      metadata: {
-                        type: "object",
-                        description: "Optional metadata",
-                        additionalProperties: {
-                          type: "string"
-                        }
-                      }
-                    },
-                    required: ["content"],
-                    additionalProperties: false
-                  },
-                  options: {
-                    namespace: "supermemory"
-                  },
-                  execute: async (input, _tool) => {
-                    const args = input as {
-                      content: string;static ? : boolean;metadata ? : Record < string,
-                      string | number | boolean | string[] >
-                    };
-                    const response = await fetch(`${config.baseUrl.replace(/\/$/, "")}/v4/memories`, {
-                      method: "POST",
-                      headers: {
-                        Authorization: `Bearer ${config.apiKey}`,
-                        "Content-Type": "application/json"
-                      },
-                      body: JSON.stringify({
-                        memories: [{
-                          content: args.content,
-                          isStatic: false,
-                          metadata: {
-                            source: "opencode",
-                            ...(args.metadata ?? {})
-                          }
-                        }],
-                        containerTag: config.containerTag
-                      })
-                    });
-                    if (!response.ok) throw new Error(`Remember failed (${response.status}): ${await response.text()}`);
-                    const result = await response.json();
-                    return {
-                      content: JSON.stringify({
-                        success: true,
-                        result
-                      })
-                    };
-                  }
-                });
-              });
-
-              await ctx.tool.transform((editor) => {
-                editor.add({
-                  name: "forget",
-                  description: "Forget a memory. Requires memoryId or exact content. Optional reason.",
-                  input: {
-                    type: "object",
-                    properties: {
-                      memoryId: {
-                        type: "string",
-                        description: "Memory ID to forget"
-                      },
-                      content: {
-                        type: "string",
-                        description: "Exact content to forget when ID unknown"
-                      },
-                      reason: {
-                        type: "string",
-                        description: "Reason for forgetting"
-                      }
-                    },
-                    required: [],
-                    additionalProperties: false
-                  },
-                  options: {
-                    namespace: "supermemory"
-                  },
-                  execute: async (input, _tool) => {
-                    const args = input as {
-                      memoryId ? : string;
-                      content ? : string;
-                      reason ? : string
-                    };
-                    if (!args.memoryId && !args.content) throw new Error("memoryId or content is required");
-                    const result = await sm.memories.forget({
-                      containerTag: config.containerTag,
-                      ...(args.memoryId ? {
-                        id: args.memoryId
-                      } : {
-                        content: args.content
-                      }),
-                      ...(args.reason ? {
-                        reason: args.reason
-                      } : {})
-                    });
-                    return {
-                      content: JSON.stringify({
-                        success: true,
-                        result
-                      })
-                    };
-                  },
-                });
-              });
-
-              await ctx.tool.transform((editor) => {
-                editor.add({
-                  name: "update",
-                  description: "Update a memory by creating a new version. Requires newContent plus memoryId or content.",
-                  input: {
-                    type: "object",
-                    properties: {
-                      memoryId: {
-                        type: "string",
-                        description: "Memory ID to update"
-                      },
-                      content: {
-                        type: "string",
-                        description: "Exact content to match when ID unknown"
-                      },
-                      newContent: {
-                        type: "string",
-                        description: "Replacement content"
-                      }
-                    },
-                    required: ["newContent"],
-                    additionalProperties: false
-                  },
-                  options: {
-                    namespace: "supermemory"
-                  },
-                  execute: async (input, _tool) => {
-                    const args = input as {
-                      memoryId ? : string;
-                      content ? : string;
-                      newContent: string
-                    };
-                    const result = await sm.memories.updateMemory({
-                      containerTag: config.containerTag,
-                      newContent: args.newContent,
-                      ...(args.memoryId ? {
-                        id: args.memoryId
-                      } : {}),
-                      ...(args.content ? {
-                        content: args.content
-                      } : {})
-                    });
-                    return {
-                      content: JSON.stringify({
-                        success: true,
-                        result
-                      })
-                    };
-                  }
-                });
-              });
-
-              await ctx.tool.transform((editor) => {
-                editor.add({
-                  name: "list",
-                  description: "Advanced browsing. List recent documents. Optional limit.",
-                  input: {
-                    type: "object",
-                    properties: {
-                      limit: {
-                        type: "number",
-                        description: "Max documents to return"
-                      }
-                    },
-                    required: [],
-                    additionalProperties: false
-                  },
-                  options: {
-                    namespace: "supermemory"
-                  },
-                  execute: async (input, _tool) => {
-                    const args = input as {
-                      limit ? : number
-                    };
-                    const result = await sm.documents.list({
-                      containerTags: [config.containerTag],
-                      limit: args.limit ?? 10,
-                      sort: "createdAt",
-                      order: "desc"
-                    });
-                    return {
-                      content: JSON.stringify({
-                        success: true,
-                        count: result.memories.length,
-                        memories: result.memories.map((d) => ({
-                          id: d.id,
-                          customId: d.customId,
-                          title: d.title,
-                          summary: d.summary,
-                          type: d.type,
-                          status: d.status,
-                          createdAt: d.createdAt,
-                          updatedAt: d.updatedAt
-                        }))
-                      })
-                    };
-                  }
-                });
-              });
-
-              await ctx.tool.transform((editor) => {
-                  editor.add({
-                        name: "get",
-                        description: "Advanced browsing. Retrieve a full document by ID. Requires documentId.",
-                        input: {
-                          type: "object",
-                          properties: {
-                            documentId: {
-                              type: "string",
-                              description: "Document ID to retrieve"
-                            }
-                          },
-                          required: ["documentId"],
-                          additionalProperties: false
-                        },
-                        options: {
-                          namespace: "supermemory"
-                        },
-                        execute: async (input, _tool) => {
-                            const args = input as {
-                              documentId: string
-                            };
-                            const result = await sm.documents.get(args.documentId);
-                            return {
-                              content: JSON.stringify({
-                                    success: true,
-                                    result
-                                  })
-                                };
-                              }
-                            });
-                          });
           })
       }
 })
