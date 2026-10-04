@@ -60,6 +60,7 @@ function formatContext(
   }
 
   if (parts.length === 1) return "";
+
   return parts.join("\n");
 }
 
@@ -176,41 +177,26 @@ export default Plugin.define({
             const ingestKey = `${sessionID}:${userMessage}`;
             if (!ingestedMessageIds.has(ingestKey)) {
               const context = await ctx.session.context({ sessionID });
-              const msgs = (context as any).messages ?? [];
-              const previousAssistant = [...msgs].reverse().find((msg: any) => msg.info?.role === "assistant");
-              const assistantText = previousAssistant?.parts
-              ?.filter((p: any) => p.type === "text" && !p.synthetic)
-              ?.map((p: any) => p.text)
-              ?.join("\n")
-              ?.trim() ?? "";
-              const conversationMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
-              if (assistantText) conversationMessages.push({ role: "assistant", content: assistantText });
-              conversationMessages.push({ role: "user", content: userMessage });
+              const msgs = (context as any).data ?? [];
+              const previousAssistant = [...msgs].reverse().find((m: any) => m.type === "assistant"); // .type, not .info?.role
+              const assistantText = previousAssistant?.content
+              ?.filter((p: any) => p?.type === "text")
+              ?.map((p: any) => p?.text)
+              ?.join("\n").trim() ?? "";
+              const content = [
+                `user: ${userMessage}`,
+                assistantText? `assistant: ${assistantText}` : "",
+              ].filter(Boolean).join("\n");
+
               const toolModel = sessionModels.get(sessionID);
-              const conversationResponse = await fetch(`${config.baseUrl.replace(/\/$/, "")}/v4/conversations`, {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${config.apiKey}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  conversationId: `session_${sessionID}`,
-                  messages: conversationMessages,
-                  containerTags: [config.containerTag],
-                  metadata: {
-                    source: "opencode",
-                    ...(toolModel ? { model: toolModel } : {}),
-                  }
-                }),
-                signal: AbortSignal.timeout(10_000),
+              await sm.add({
+                content,
+                containerTag: config.containerTag,
+                customId: sessionID,
+                metadata: { source: "opencode", ...(toolModel ? { model: toolModel } : {}) },
               });
-              if (!conversationResponse.ok) {
-                throw new Error(
-                  `Conversation ingestion failed (${conversationResponse.status}): ${await conversationResponse.text()}`
-                );
-              }
               ingestedMessageIds.add(ingestKey);
-              console.log(`[Supermemory] ingested ${conversationMessages.length} msgs for ${sessionID}`);
+              console.log(`[Supermemory] ingested ${assistantText ? "user+assistant" : "user"} for ${sessionID} (customId=${sessionID})`);
             }
           } catch (ingestErr) {
             const message = `Conversation ingestion failed: ${ingestErr instanceof Error ? ingestErr.message : String(ingestErr)}`;
@@ -225,7 +211,7 @@ export default Plugin.define({
               properties: {
                 query: {
                   type: "string",
-                  description: "Search query text"
+                  description: "Search query text, Required."
                 },
                 limit: {
                   type: "number",
@@ -571,11 +557,16 @@ export default Plugin.define({
                           content: JSON.stringify({
                             success: true,
                             result
-                          })
-                        };
-                      }
-                    });
-                  });
-          })
-      }
-})
+                        }
+                      )
+                    };
+                  }
+                }
+              );
+            }
+          );
+        }
+      )
+    }
+  }
+)
