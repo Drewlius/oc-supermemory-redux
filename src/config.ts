@@ -17,7 +17,7 @@ export interface Config {
 }
 
 const DEFAULT_BASE_URL = "https://api.supermemory.ai";
-
+const CONFIG_DIR = process.env.OPENCODE_CONFIG_DIR?.trim() || join(homedir(), ".config", "opencode");
 const DEFAULT_ENTITY_CONTEXT = `Shared coding-agent memory for one user.
 
 EXTRACT:
@@ -29,6 +29,29 @@ SKIP:
 - Generic suggestions the user did not accept
 - Transient command output and low-value chatter
 - Granular details that do not help future work`;
+
+function loadConfigFile(): Record<string, unknown> | null {
+  return firstJson(["supermemory.jsonc", "supermemory.json"], true);
+}
+
+function firstJson(names: string[], stripComments: boolean): Record<string, unknown> | null {
+  for (const name of names) {
+    const parsed = readJsonFile(join(CONFIG_DIR, name), stripComments);
+    if (parsed != undefined) return parsed;
+  }
+  return null;
+}
+
+function readJsonFile(path: string, stripComments: boolean): Record<string, unknown> | null {
+  if (!existsSync(path)) return null;          
+  try {
+    const raw = readFileSync(path, "utf-8");
+    return JSON.parse(stripComments ? stripJsoncComments(raw) : raw);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`Failed to parse ${path}: ${msg}`);
+  }
+}
 
 function stripJsoncComments(content: string): string {
   let result = "";
@@ -80,58 +103,33 @@ function stripJsoncComments(content: string): string {
 
   return result.replace(/,(\s*[}\]])/g, "$1");
 }
-
-function loadConfigFile(): Record<string, unknown> | null {
-  const configDir = join(homedir(), ".config", "opencode");
-  const paths = [
-    join(configDir, "supermemory.jsonc"),
-    join(configDir, "supermemory.json"),
-  ];
-
-  for (const path of paths) {
-    if (!existsSync(path)) continue;
-    try {
-      const raw = readFileSync(path, "utf-8");
-      return JSON.parse(stripJsoncComments(raw));
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(`Failed to parse ${path}: ${msg}`);
-    }
+                                                                                          
+function requireKey(value: unknown, source: string): string {     /** Validates an API key from a given source and returns it normalized. */
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${source} must be a non-empty string`);
   }
-
-  return null;
+  return value.trim();
 }
 
 function loadApiKey(fileConfig: Record<string, unknown> | null): string | undefined {
   if (process.env.SUPERMEMORY_API_KEY !== undefined) {
-    if (!process.env.SUPERMEMORY_API_KEY.trim()) {
-      throw new Error("SUPERMEMORY_API_KEY must be a non-empty string");
-    }
-    return process.env.SUPERMEMORY_API_KEY;
+    return requireKey(process.env.SUPERMEMORY_API_KEY, "SUPERMEMORY_API_KEY");
   }
-  if (fileConfig?.apiKey !== undefined) {
-    if (typeof fileConfig.apiKey !== "string" || !fileConfig.apiKey.trim()) {
-      throw new Error("apiKey must be a non-empty string");
-    }
-    return fileConfig.apiKey;
+    if (fileConfig?.apiKey !== undefined) {
+      return requireKey(fileConfig.apiKey, "apiKey");
   }
 
-  const opencodeCreds = join(homedir(), ".config", "opencode", "supermemory-credentials.json");
-  if (existsSync(opencodeCreds)) {
-    try {
-      const c = JSON.parse(readFileSync(opencodeCreds, "utf-8"));
-      if (c.apiKey !== undefined) {
-        if (typeof c.apiKey !== "string" || !c.apiKey.trim()) {
-          throw new Error(`apiKey in ${opencodeCreds} must be a non-empty string`);
-        }
-        return c.apiKey;
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(`Failed to parse ${opencodeCreds}: ${msg}`);
-    }
+  // failure and a bad apiKey reports as a validation failure, not both.
+  const creds = firstJson([
+    "supermemory-credentials.jsonc",
+    "supermemory-credentials.json",
+  ], false) as  { apiKey?: unknown } | null;
+  if (creds?.apiKey !== undefined) {
+    return requireKey(
+      creds.apiKey,
+      `apiKey in ${join(CONFIG_DIR, "supermemory-crednetial.json")}`
+    );
   }
-
   return undefined;
 }
 
