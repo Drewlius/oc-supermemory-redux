@@ -6668,7 +6668,8 @@ var Compaction = Union2([
 var Transport = Literals(["http", "websocket"]).annotate({ identifier: "Provider.Transport" });
 var Settings = StructWithRest(Struct({
   timeout: Union2([Finite, Literal2(false)]).pipe(optional3),
-  chunkTimeout: Finite.pipe(optional3),
+  headerTimeout: Union2([Finite, Literal2(false)]).pipe(optional3),
+  chunkTimeout: Union2([Finite, Literal2(false)]).pipe(optional3),
   compaction: Compaction.pipe(optional3),
   transport: Transport.pipe(optional3)
 }), [Record(String5, Any2)]).annotate({ identifier: "Provider.Settings" });
@@ -9800,6 +9801,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 var DEFAULT_BASE_URL = "https://api.supermemory.ai";
+var CONFIG_DIR = process.env.OPENCODE_CONFIG_DIR?.trim() || join(homedir(), ".config", "opencode");
 var DEFAULT_ENTITY_CONTEXT = `Shared coding-agent memory for one user.
 
 EXTRACT:
@@ -9811,6 +9813,28 @@ SKIP:
 - Generic suggestions the user did not accept
 - Transient command output and low-value chatter
 - Granular details that do not help future work`;
+function loadConfigFile() {
+  return firstJson(["supermemory.jsonc", "supermemory.json"], true);
+}
+function firstJson(names, stripComments) {
+  for (const name of names) {
+    const parsed = readJsonFile(join(CONFIG_DIR, name), stripComments);
+    if (parsed != null)
+      return parsed;
+  }
+  return null;
+}
+function readJsonFile(path, stripComments) {
+  if (!existsSync(path))
+    return null;
+  try {
+    const raw = readFileSync(path, "utf-8");
+    return JSON.parse(stripComments ? stripJsoncComments(raw) : raw);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`Failed to parse ${path}: ${msg}`);
+  }
+}
 function stripJsoncComments(content) {
   let result = "";
   let inString = false;
@@ -9857,52 +9881,25 @@ function stripJsoncComments(content) {
   }
   return result.replace(/,(\s*[}\]])/g, "$1");
 }
-function loadConfigFile() {
-  const configDir = join(homedir(), ".config", "opencode");
-  const paths = [
-    join(configDir, "supermemory.jsonc"),
-    join(configDir, "supermemory.json")
-  ];
-  for (const path of paths) {
-    if (!existsSync(path))
-      continue;
-    try {
-      const raw = readFileSync(path, "utf-8");
-      return JSON.parse(stripJsoncComments(raw));
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(`Failed to parse ${path}: ${msg}`);
-    }
+function requireKey(value, source) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${source} must be a non-empty string`);
   }
-  return null;
+  return value.trim();
 }
 function loadApiKey(fileConfig) {
   if (process.env.SUPERMEMORY_API_KEY !== undefined) {
-    if (!process.env.SUPERMEMORY_API_KEY.trim()) {
-      throw new Error("SUPERMEMORY_API_KEY must be a non-empty string");
-    }
-    return process.env.SUPERMEMORY_API_KEY;
+    return requireKey(process.env.SUPERMEMORY_API_KEY, "SUPERMEMORY_API_KEY");
   }
   if (fileConfig?.apiKey !== undefined) {
-    if (typeof fileConfig.apiKey !== "string" || !fileConfig.apiKey.trim()) {
-      throw new Error("apiKey must be a non-empty string");
-    }
-    return fileConfig.apiKey;
+    return requireKey(fileConfig.apiKey, "apiKey");
   }
-  const opencodeCreds = join(homedir(), ".config", "opencode", "supermemory-credentials.json");
-  if (existsSync(opencodeCreds)) {
-    try {
-      const c = JSON.parse(readFileSync(opencodeCreds, "utf-8"));
-      if (c.apiKey !== undefined) {
-        if (typeof c.apiKey !== "string" || !c.apiKey.trim()) {
-          throw new Error(`apiKey in ${opencodeCreds} must be a non-empty string`);
-        }
-        return c.apiKey;
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(`Failed to parse ${opencodeCreds}: ${msg}`);
-    }
+  const creds = firstJson([
+    "supermemory-credentials.jsonc",
+    "supermemory-credentials.json"
+  ], false);
+  if (creds?.apiKey !== undefined) {
+    return requireKey(creds.apiKey, `apiKey in ${join(CONFIG_DIR, "supermemory-crednetial.json")}`);
   }
   return;
 }
@@ -9927,7 +9924,7 @@ function loadConfig() {
   try {
     parsedBaseUrl = new URL(baseUrl);
   } catch {
-    throw new Error("baseUrl must be a valid URL");
+    parsedBaseUrl = new URL(`http://${baseUrl}`);
   }
   if (parsedBaseUrl.protocol !== "http:" && parsedBaseUrl.protocol !== "https:") {
     throw new Error("baseUrl must use http or https");
@@ -9937,7 +9934,7 @@ function loadConfig() {
     throw new Error("similarityThreshold must be a number between 0 and 1");
   }
   const maxMemories = fileConfig?.maxMemories ?? 3;
-  if (!Number.isInteger(maxMemories) || maxMemories < 1 || maxMemories > 100) {
+  if (typeof maxMemories !== "number" || !Number.isInteger(maxMemories) || maxMemories < 1 || maxMemories > 100) {
     throw new Error("maxMemories must be an integer between 1 and 100");
   }
   const injectProfile = fileConfig?.injectProfile ?? true;
@@ -10145,37 +10142,24 @@ ${SAVE_NUDGE}`;
         const ingestKey = `${sessionID}:${userMessage}`;
         if (!ingestedMessageIds.has(ingestKey)) {
           const context = await ctx.session.context({ sessionID });
-          const msgs = context.messages ?? [];
-          const previousAssistant = [...msgs].reverse().find((msg) => msg.info?.role === "assistant");
-          const assistantText = previousAssistant?.parts?.filter((p) => p.type === "text" && !p.synthetic)?.map((p) => p.text)?.join(`
-`)?.trim() ?? "";
-          const conversationMessages = [];
-          if (assistantText)
-            conversationMessages.push({ role: "assistant", content: assistantText });
-          conversationMessages.push({ role: "user", content: userMessage });
+          const msgs = context.data ?? [];
+          const previousAssistant = [...msgs].reverse().find((m) => m.type === "assistant");
+          const assistantText = previousAssistant?.content?.filter((p) => p?.type === "text")?.map((p) => p?.text)?.join(`
+`).trim() ?? "";
+          const content = [
+            `user: ${userMessage}`,
+            assistantText ? `assistant: ${assistantText}` : ""
+          ].filter(Boolean).join(`
+`);
           const toolModel = sessionModels.get(sessionID);
-          const conversationResponse = await fetch(`${config.baseUrl.replace(/\/$/, "")}/v4/conversations`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${config.apiKey}`,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              conversationId: `session_${sessionID}`,
-              messages: conversationMessages,
-              containerTags: [config.containerTag],
-              metadata: {
-                source: "opencode",
-                ...toolModel ? { model: toolModel } : {}
-              }
-            }),
-            signal: AbortSignal.timeout(1e4)
+          await sm.add({
+            content,
+            containerTag: config.containerTag,
+            customId: sessionID,
+            metadata: { source: "opencode", ...toolModel ? { model: toolModel } : {} }
           });
-          if (!conversationResponse.ok) {
-            throw new Error(`Conversation ingestion failed (${conversationResponse.status}): ${await conversationResponse.text()}`);
-          }
           ingestedMessageIds.add(ingestKey);
-          console.log(`[Supermemory] ingested ${conversationMessages.length} msgs for ${sessionID}`);
+          console.log(`[Supermemory] ingested ${assistantText ? "user+assistant" : "user"} for ${sessionID} (customId=${sessionID})`);
         }
       } catch (ingestErr) {
         const message = `Conversation ingestion failed: ${ingestErr instanceof Error ? ingestErr.message : String(ingestErr)}`;
@@ -10190,7 +10174,7 @@ ${SAVE_NUDGE}`;
             properties: {
               query: {
                 type: "string",
-                description: "Search query text"
+                description: "Search query text, Required."
               },
               limit: {
                 type: "number",
@@ -10460,7 +10444,7 @@ ${SAVE_NUDGE}`;
                 description: "Max documents to return"
               }
             },
-            required: [],
+            required: false,
             additionalProperties: false
           },
           options: {
@@ -10505,13 +10489,13 @@ ${SAVE_NUDGE}`;
                 description: "Document ID to retrieve"
               }
             },
-            required: ["documentId"],
+            required: "documentId",
             additionalProperties: false
           },
           options: {
             namespace: "supermemory"
           },
-          execute: async (input, _tool) => {
+          execute: async (input) => {
             const args = input;
             const result = await sm.documents.get(args.documentId);
             return {
