@@ -127,7 +127,7 @@ function loadApiKey(fileConfig: Record<string, unknown> | null): string | undefi
   if (creds?.apiKey !== undefined) {
     return requireKey(
       creds.apiKey,
-      `apiKey in ${join(CONFIG_DIR, "supermemory-crednetial.json")}`
+      `apiKey in ${join(CONFIG_DIR, "supermemory-credentials.json")}`
     );
   }
   return undefined;
@@ -162,11 +162,12 @@ export function loadConfig(): Config {
   if (typeof baseUrl !== "string") {
     throw new Error("baseUrl must be a string");
   }
+  const normalizedBaseUrl = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(baseUrl) ? baseUrl : `http://${baseUrl}`;
   let parsedBaseUrl: URL;
   try {
-    parsedBaseUrl = new URL(baseUrl);
+    parsedBaseUrl = new URL(normalizedBaseUrl);
   } catch {
-    parsedBaseUrl = new URL(`http://${baseUrl}`);
+    throw new Error("baseUrl must be a valid URL");
   }
   if (parsedBaseUrl.protocol !== "http:" && parsedBaseUrl.protocol !== "https:") {
     throw new Error("baseUrl must use http or https");
