@@ -7127,6 +7127,25 @@ var FileContent = Struct({
   name: optional2(String5)
 }).annotate({ identifier: "Tool.FileContent" });
 var Content = Union2([TextContent, FileContent]).pipe(toTaggedUnion("type")).annotate({ identifier: "Tool.Content" });
+
+// node_modules/@opencode/schema/dist/session-metadata.js
+var SessionMetadata = Record(String5, Json2).annotate({
+  identifier: "Session.Metadata"
+});
+// node_modules/@opencode/schema/dist/session-provider-context.js
+var Provenance = Struct({
+  providerID: ID5,
+  provider: String5,
+  modelID: String5,
+  route: String5,
+  protocol: String5,
+  endpoint: String5
+}).annotate({ identifier: "Session.ProviderContext.Provenance" });
+var Info11 = Struct({
+  version: Literal2(1),
+  provenance: Provenance,
+  messages: Json2
+}).annotate({ identifier: "Session.ProviderContext" });
 // node_modules/@opencode/schema/dist/skill.js
 var ID11 = String5.pipe(brand2("Skill.ID"));
 var Name2 = String5.pipe(brand2("Skill.Name"));
@@ -7138,7 +7157,7 @@ var UrlSource = Struct({
   type: tag("url"),
   url: String5
 }).annotate({ identifier: "Skill.UrlSource" });
-var Info11 = Struct({
+var Info12 = Struct({
   id: ID11,
   name: Name2,
   description: String5.pipe(optional3),
@@ -7150,7 +7169,7 @@ var Updated9 = ephemeral({ type: "skill.updated", schema: {} });
 var Event11 = { Updated: Updated9, Definitions: inventory(Updated9) };
 var EmbeddedSource = Struct({
   type: tag("embedded"),
-  skill: suspend2(() => Info11)
+  skill: suspend2(() => Info12)
 }).annotate({ identifier: "Skill.EmbeddedSource" });
 var Source2 = Object.assign(Union2([DirectorySource, UrlSource, EmbeddedSource]).pipe(toTaggedUnion("type"), annotate2({ identifier: "Skill.Source" })), {
   equals: (a, b) => {
@@ -7219,25 +7238,6 @@ var Prompt = Struct({
     ...input.skills === undefined ? {} : { skills: input.skills }
   })
 })));
-
-// node_modules/@opencode/schema/dist/session-metadata.js
-var SessionMetadata = Record(String5, Json2).annotate({
-  identifier: "Session.Metadata"
-});
-// node_modules/@opencode/schema/dist/session-provider-context.js
-var Provenance = Struct({
-  providerID: ID5,
-  provider: String5,
-  modelID: String5,
-  route: String5,
-  protocol: String5,
-  endpoint: String5
-}).annotate({ identifier: "Session.ProviderContext.Provenance" });
-var Info12 = Struct({
-  version: Literal2(1),
-  provenance: Provenance,
-  messages: Json2
-}).annotate({ identifier: "Session.ProviderContext" });
 // node_modules/@opencode/schema/dist/shell.js
 var IDSchema3 = String5.check(isStartsWith("sh_")).pipe(brand2("Shell.ID"));
 var ID12 = IDSchema3.pipe(statics((schema) => {
@@ -7489,7 +7489,7 @@ var CompactionCompleted = Struct({
   providerState: ProviderState.pipe(optional3),
   summary: String5,
   recent: String5,
-  providerContext: Info12.pipe(optional3),
+  providerContext: Info11.pipe(optional3),
   ...CompactionUsage
 }).annotate({ identifier: "Session.Message.Compaction.Completed" });
 var CompactionFailed = Struct({
@@ -9300,7 +9300,7 @@ var readEnv = (env) => {
 };
 
 // node_modules/supermemory/client.mjs
-var __dirname = "/home/slippy/repos/superMemory_Redux_OpenCode/node_modules/supermemory";
+var __dirname = "/home/slippy/repos/superMemory-Redux_OpenCode/node_modules/supermemory";
 var _Supermemory_instances;
 var _a;
 var _Supermemory_encoder;
@@ -9796,6 +9796,11 @@ async function getCurrentModuleDir(pathModule, urlModule) {
   } catch {}
   return;
 }
+// src/index.ts
+import { appendFileSync, mkdirSync } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { dirname, join as join2 } from "node:path";
+
 // src/config.ts
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -9899,7 +9904,7 @@ function loadApiKey(fileConfig) {
     "supermemory-credentials.json"
   ], false);
   if (creds?.apiKey !== undefined) {
-    return requireKey(creds.apiKey, `apiKey in ${join(CONFIG_DIR, "supermemory-crednetial.json")}`);
+    return requireKey(creds.apiKey, `apiKey in ${join(CONFIG_DIR, "supermemory-credentials.json")}`);
   }
   return;
 }
@@ -9920,11 +9925,12 @@ function loadConfig() {
   if (typeof baseUrl !== "string") {
     throw new Error("baseUrl must be a string");
   }
+  const normalizedBaseUrl = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(baseUrl) ? baseUrl : `http://${baseUrl}`;
   let parsedBaseUrl;
   try {
-    parsedBaseUrl = new URL(baseUrl);
+    parsedBaseUrl = new URL(normalizedBaseUrl);
   } catch {
-    parsedBaseUrl = new URL(`http://${baseUrl}`);
+    throw new Error("baseUrl must be a valid URL");
   }
   if (parsedBaseUrl.protocol !== "http:" && parsedBaseUrl.protocol !== "https:") {
     throw new Error("baseUrl must use http or https");
@@ -9984,6 +9990,35 @@ The user wants you to remember something. Use the \`supermemory\` tool with \`mo
 Extract the key information and save it as a concise, searchable memory.
 
 DO NOT skip this step. The user explicitly asked you to remember.`;
+var LOG_FILE = join2(homedir2(), ".local", "share", "opencode", "log", "superMemory-Redux_OpenCode.log");
+var ingestedMessageIds = new Set;
+var profiledSessions = new Set;
+var searchedMessageIds = new Set;
+var sessionModels = new Map;
+function errMsg(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function fileLog(level, message, extra) {
+  const stamp = `${new Date().toISOString().slice(0, 22)}Z`;
+  const line = `${stamp} [${level}] ${message}` + (extra === undefined ? "" : ` ${safeSnippet(extra)}`) + `
+`;
+  try {
+    mkdirSync(dirname(LOG_FILE), { recursive: true });
+    appendFileSync(LOG_FILE, line);
+  } catch {}
+  if (level === "error")
+    console.error(`[superMemory Redux] ${message}`);
+  else
+    console.log(`[superMemory Redux] ${message}`);
+}
+function safeSnippet(value, max = 500) {
+  try {
+    const s = typeof value === "string" ? value : JSON.stringify(value);
+    return s.length > max ? s.slice(0, max) + "…" : s;
+  } catch {
+    return "[unserializable]";
+  }
+}
 function extractFactText(fact) {
   if (typeof fact === "string")
     return fact;
@@ -9994,7 +10029,7 @@ function extractFactText(fact) {
     return String(obj.content);
   if (obj?.fact)
     return String(obj.fact);
-  return JSON.stringify(fact);
+  return JSON.stringify(fact) ?? String(fact);
 }
 function formatContext(profile, searchResults, config) {
   const parts = ["[SUPERMEMORY]"];
@@ -10027,127 +10062,145 @@ Relevant Memories:`);
   return parts.join(`
 `);
 }
+function toRecallResults(items) {
+  return (items ?? []).map((r) => ({
+    memory: r.memory ?? r.chunk ?? r.content ?? (typeof r === "string" ? r : ""),
+    chunk: r.chunk ?? "",
+    similarity: r.similarity ?? r.score ?? 0,
+    status: r.status ?? r.document?.status
+  }));
+}
 var src_default = define({
   id: "superMemory-Redux",
   async setup(ctx) {
-    let lastErrorNoticeAt = 0;
-    console.log(`Loaded for ${ctx.location.directory}`);
-    const notifyError = async (message, throttle = true) => {
-      const now = Date.now();
-      if (throttle && now - lastErrorNoticeAt < 30000)
-        return;
-      lastErrorNoticeAt = now;
-      console.error(`[superMemory Redux] ${message.slice(0, 500)}`);
-    };
+    fileLog("info", `setup start dir=${ctx.location.directory}`);
     let config;
     try {
       config = loadConfig();
     } catch (e) {
       const message = `Configuration failed: ${e instanceof Error ? e.message : String(e)}`;
-      await notifyError(message, false);
+      fileLog("error", message);
       return;
     }
-    const sm = new Supermemory({
-      apiKey: config.apiKey,
-      baseURL: config.baseUrl
-    });
-    let entityContextSynced = false;
-    const syncEntityContext = async () => {
-      if (entityContextSynced)
-        return;
-      const response = await fetch(`${config.baseUrl.replace(/\/$/, "")}/v3/container-tags/${encodeURIComponent(config.containerTag)}`, {
-        method: "PATCH",
-        headers: {
-          Authorization: `Bearer ${config.apiKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          entityContext: config.entityContext
-        }),
-        signal: AbortSignal.timeout(1e4)
-      });
-      if (response.status === 404)
-        return;
-      if (!response.ok) {
-        throw new Error(`Entity context synchronization failed (${response.status}): ${await response.text()}`);
-      }
-      entityContextSynced = true;
+    const sm = new Supermemory({ apiKey: config.apiKey, baseURL: config.baseUrl });
+    const SEARCH_MODE = "hybrid";
+    const apiHeaders = {
+      Authorization: `Bearer ${config.apiKey}`,
+      "Content-Type": "application/json"
     };
     const trySyncEntityContext = async () => {
       try {
-        await syncEntityContext();
+        const response = await fetch(`${config.baseUrl}/v3/container-tags/${encodeURIComponent(config.containerTag)}`, {
+          method: "PATCH",
+          headers: apiHeaders,
+          body: JSON.stringify({ entityContext: config.entityContext }),
+          signal: AbortSignal.timeout(1e4)
+        });
+        if (!response.ok)
+          fileLog("warn", `entity context sync failed (${response.status}): ${await response.text()}`);
+        else
+          fileLog("info", "entity context synced");
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await notifyError(message, true);
+        fileLog("warn", "entity context sync failed", errMsg(error));
       }
     };
-    console.log(`[supermemory] config loaded for ${config.containerTag}`);
-    trySyncEntityContext().catch((e) => console.error(e));
-    const ingestedMessageIds = new Set;
-    const profiledSessions = new Set;
-    const sessionModels = new Map;
+    trySyncEntityContext();
+    const recallLines = (which, id) => ({
+      ok: which === "profile" ? `profile injection successful for session:${id}` : `search results acquisition successful for session${id}`,
+      failed: which === "profile" ? `profile injection failed for session:${id}` : `search results acquisition failed for session${id}`
+    });
+    const postSynthetic = (sessionID, text, source) => ctx.session.synthetic({
+      sessionID,
+      text,
+      delivery: "steer",
+      resume: false,
+      metadata: { source }
+    });
+    const deliverInjection = async (label, sessionID, rawUserMessage, text) => {
+      if (!text) {
+        fileLog("error", recallLines(label, sessionID).failed, { results: 0, threshold: config.similarityThreshold, q: rawUserMessage.slice(0, 200) });
+        return null;
+      }
+      const posted = await postSynthetic(sessionID, text, "supermemory-recall").catch((error) => {
+        fileLog("error", recallLines(label, sessionID).failed, errMsg(error));
+        return null;
+      });
+      if (!posted)
+        return null;
+      fileLog("info", recallLines(label, sessionID).ok, { chars: text.length, qChars: rawUserMessage.length, syntheticId: posted?.id ?? null });
+      return posted;
+    };
     await ctx.session.hook("prompt", async (event) => {
-      const userMessage = event.prompt.text?.trim();
-      if (!userMessage)
+      const rawUserMessage = event.prompt.text?.trim();
+      if (!rawUserMessage)
         return;
       const sessionID = event.sessionID;
-      const modelID = event.model?.modelID ?? event.model?.id;
+      const model = event.model;
+      const modelID = model?.modelID ?? model?.id;
       if (modelID)
         sessionModels.set(sessionID, modelID);
+      const turnID = `${sessionID}:${event.messageID ?? rawUserMessage}`;
+      const searchKey = `${turnID}:search`;
+      const ingestKey = `${turnID}:ingest`;
+      let label = "";
+      let text = "";
       if (!profiledSessions.has(sessionID)) {
-        const profileRes = await sm.profile({
-          containerTag: config.containerTag,
-          q: userMessage,
-          threshold: config.similarityThreshold
-        });
-        const text = formatContext(profileRes.profile ?? null, profileRes.searchResults ? {
-          results: (profileRes.searchResults.results ?? []).map((r) => ({
-            memory: r.memory ?? r.chunk ?? r.content ?? (typeof r === "string" ? r : ""),
-            chunk: r.chunk ?? "",
-            similarity: r.similarity ?? r.score ?? 0
-          }))
-        } : null, config);
-        if (text)
-          event.prompt.text = `${userMessage}
-
-${text}`;
-        profiledSessions.add(sessionID);
-      } else {
-        const results = await sm.search({
-          q: userMessage,
-          containerTag: config.containerTag,
-          searchMode: "hybrid",
-          limit: config.maxMemories,
-          threshold: config.similarityThreshold
-        });
-        const text = formatContext(null, {
-          results: (results.results ?? []).map((r) => ({
-            memory: r.memory ?? r.chunk ?? r.content ?? "",
-            chunk: r.chunk ?? "",
-            similarity: r.similarity ?? r.score ?? 0
-          }))
-        }, config);
-        if (text)
-          event.prompt.text = `${userMessage}
-
-${text}`;
+        label = "profile";
+        try {
+          const profileRes = await sm.profile({
+            containerTag: config.containerTag,
+            q: rawUserMessage,
+            threshold: config.similarityThreshold
+          });
+          text = formatContext(profileRes.profile ?? null, profileRes.searchResults ? { results: toRecallResults(profileRes.searchResults.results ?? []) } : null, config);
+        } catch (error) {
+          fileLog("error", recallLines("profile", sessionID).failed, errMsg(error));
+          label = "";
+        } finally {
+          profiledSessions.add(sessionID);
+          searchedMessageIds.add(searchKey);
+        }
+      } else if (!searchedMessageIds.has(searchKey)) {
+        label = "search";
+        try {
+          const results = await sm.search({
+            q: rawUserMessage,
+            containerTag: config.containerTag,
+            searchMode: SEARCH_MODE,
+            limit: config.maxMemories,
+            threshold: config.similarityThreshold,
+            rerank: config.rerank,
+            rewriteQuery: config.rewriteQuery,
+            aggregate: config.aggregate,
+            include: { summaries: config.includeSummaries }
+          });
+          text = formatContext(null, { results: toRecallResults(results.results ?? []) }, config);
+        } catch (error) {
+          fileLog("error", recallLines("search", sessionID).failed, errMsg(error));
+          label = "";
+        } finally {
+          searchedMessageIds.add(searchKey);
+        }
       }
-      if (KEYWORD_PATTERN.test(userMessage)) {
-        event.prompt.text = `${userMessage}
-
-${SAVE_NUDGE}`;
+      if (label)
+        await deliverInjection(label, sessionID, rawUserMessage, text);
+      if (KEYWORD_PATTERN.test(rawUserMessage)) {
+        const nudge = await postSynthetic(sessionID, SAVE_NUDGE, "supermemory-nudge").catch((error) => {
+          fileLog("error", `keyword trigger failed for session:${sessionID}`, errMsg(error));
+          return null;
+        });
+        if (nudge)
+          fileLog("info", `keyword trigger posted for session:${sessionID}`, { syntheticId: nudge?.id ?? null });
       }
       try {
-        const sessionID = event.sessionID;
-        const ingestKey = `${sessionID}:${userMessage}`;
         if (!ingestedMessageIds.has(ingestKey)) {
           const context = await ctx.session.context({ sessionID });
-          const msgs = context.data ?? [];
+          const msgs = Array.isArray(context) ? context : context?.data ?? [];
           const previousAssistant = [...msgs].reverse().find((m) => m.type === "assistant");
-          const assistantText = previousAssistant?.content?.filter((p) => p?.type === "text")?.map((p) => p?.text)?.join(`
+          const assistantText = previousAssistant?.content?.filter((p) => p?.type === "text")?.map((p) => String(p?.text ?? ""))?.join(`
 `).trim() ?? "";
           const content = [
-            `user: ${userMessage}`,
+            `user: ${rawUserMessage}`,
             assistantText ? `assistant: ${assistantText}` : ""
           ].filter(Boolean).join(`
 `);
@@ -10156,358 +10209,238 @@ ${SAVE_NUDGE}`;
             content,
             containerTag: config.containerTag,
             customId: sessionID,
-            metadata: { source: "opencode", ...toolModel ? { model: toolModel } : {} }
+            metadata: { source: "opencode", ...toolModel ? { model: toolModel } : {} },
+            ...{ dreaming: "dynamic" }
           });
           ingestedMessageIds.add(ingestKey);
-          console.log(`[Supermemory] ingested ${assistantText ? "user+assistant" : "user"} for ${sessionID} (customId=${sessionID})`);
+          fileLog("info", `conversation turn ingestion successful for session ${sessionID}`, { userChars: rawUserMessage.length, asstChars: assistantText.length });
         }
       } catch (ingestErr) {
-        const message = `Conversation ingestion failed: ${ingestErr instanceof Error ? ingestErr.message : String(ingestErr)}`;
-        await notifyError(message, true);
+        fileLog("error", `conversation turn ingestion failed for session ${sessionID}`, errMsg(ingestErr));
       }
-      await ctx.tool.transform((editor) => {
-        editor.add({
-          name: "search",
-          description: "Search Supermemory for relevant memories. Requires query, others are optional.",
-          input: {
-            type: "object",
-            properties: {
-              query: {
-                type: "string",
-                description: "Search query text, Required."
-              },
-              limit: {
-                type: "number",
-                description: "Max memories to return"
-              },
-              rerank: {
-                type: "boolean",
-                description: "Rerank by relevance"
-              },
-              rewriteQuery: {
-                type: "boolean",
-                description: "Rewrite query for better recall, adds latency"
-              },
-              aggregate: {
-                type: "boolean",
-                description: "If true, aggregates information from multiple memories to create new synthesized memories."
-              },
-              summaries: {
-                type: "boolean",
-                description: "Include document summaries"
-              }
-            },
-            required: ["query"],
-            additionalProperties: false
+    });
+    const wrapExecute = (toolName, fn) => async (input) => {
+      try {
+        const { content, resolved } = await fn(input);
+        fileLog("info", `${toolName} success`, resolved ?? safeSnippet(input, 200));
+        return { content };
+      } catch (error) {
+        const message = errMsg(error);
+        fileLog("error", `${toolName} failed`, message);
+        return { content: JSON.stringify({ success: false, error: message }) };
+      }
+    };
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "search",
+        description: "Find relevant past memories for the current task. Check on your own when prior context could help.",
+        input: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Search query text" },
+            limit: { type: "number", description: "Max memories to return" },
+            rerank: { type: "boolean", description: "Rerank by relevance" },
+            rewriteQuery: { type: "boolean", description: "Rewrite query for better recall" },
+            aggregate: { type: "boolean", description: "Synthesize memories into a summary" },
+            summaries: { type: "boolean", description: "Include document summaries" }
           },
-          options: {
-            namespace: "supermemory"
-          },
-          execute: async (input, _tool) => {
-            const args = input;
-            const results = await sm.search({
-              q: args.query,
-              containerTag: config.containerTag,
-              searchMode: "hybrid",
-              limit: args.limit ?? config.maxMemories,
-              threshold: config.similarityThreshold,
-              rerank: args.rerank ?? config.rerank,
-              rewriteQuery: args.rewriteQuery ?? config.rewriteQuery,
-              aggregate: args.aggregate ?? config.aggregate,
-              include: {
-                summaries: args.summaries ?? config.includeSummaries
-              }
-            });
-            return {
-              content: JSON.stringify({
-                success: true,
-                results
-              })
-            };
-          }
-        });
-      });
-      await ctx.tool.transform((editor) => {
-        editor.add({
-          name: "add",
-          description: "Ingest content into memory supports Text string, file path, or URL",
-          input: {
-            type: "object",
-            properties: {
-              content: {
-                type: "string",
-                description: "The content to extract and process into a document. This can be a URL, website, PDF, image, or video"
-              },
-              filepath: {
-                type: "string",
-                description: "Optional filepath Used by SuperMemory to store the full path of the file."
-              },
-              metadata: {
-                type: "object",
-                description: "optional metadata",
-                additionalProperties: {
-                  type: ["string", "number", "boolean", "array"]
-                }
-              },
-              taskType: {
-                type: "string",
-                enum: ["memory", "superrag"],
-                description: "Task type: memory (default) for full context layer with SuperRAG built in, superrag for managed RAG as a service."
-              }
-            },
-            required: ["content"],
-            additionalProperties: false
-          },
-          options: {
-            namespace: "supermemory"
-          },
-          execute: async (input, _tool) => {
-            const args = input;
-            const results = await sm.add({
-              containerTag: config.containerTag,
-              content: args.content,
-              filepath: args.filepath,
-              metadata: args.metadata
-            });
-            return {
-              content: JSON.stringify({
-                success: true,
-                results
-              })
-            };
-          }
-        });
-      });
-      await ctx.tool.transform((editor) => {
-        editor.add({
-          name: "remember",
-          description: "Store an exact memory directly. Requires content. Use for explicit facts, not document ingestion.",
-          input: {
-            type: "object",
-            properties: {
-              content: {
-                type: "string",
-                description: "Exact memory text to store"
-              },
-              metadata: {
-                type: "object",
-                description: "Optional metadata",
-                additionalProperties: {
-                  type: "string"
-                }
-              }
-            },
-            required: ["content"],
-            additionalProperties: false
-          },
-          options: {
-            namespace: "supermemory"
-          },
-          execute: async (input, _tool) => {
-            const args = input;
-            const response = await fetch(`${config.baseUrl.replace(/\/$/, "")}/v4/memories`, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${config.apiKey}`,
-                "Content-Type": "application/json"
-              },
-              body: JSON.stringify({
-                memories: [{
-                  content: args.content,
-                  isStatic: false,
-                  metadata: {
-                    source: "opencode",
-                    ...args.metadata ?? {}
-                  }
-                }],
-                containerTag: config.containerTag
-              })
-            });
-            if (!response.ok)
-              throw new Error(`Remember failed (${response.status}): ${await response.text()}`);
-            const result = await response.json();
-            return {
-              content: JSON.stringify({
-                success: true,
-                result
-              })
-            };
-          }
-        });
-      });
-      await ctx.tool.transform((editor) => {
-        editor.add({
-          name: "forget",
-          description: "Forget a memory. Requires memoryId or exact content. Optional reason.",
-          input: {
-            type: "object",
-            properties: {
-              memoryId: {
-                type: "string",
-                description: "Memory ID to forget"
-              },
-              content: {
-                type: "string",
-                description: "Exact content to forget when ID unknown"
-              },
-              reason: {
-                type: "string",
-                description: "Reason for forgetting"
-              }
-            },
-            required: [],
-            additionalProperties: false
-          },
-          options: {
-            namespace: "supermemory"
-          },
-          execute: async (input, _tool) => {
-            const args = input;
-            if (!args.memoryId && !args.content)
-              throw new Error("memoryId or content is required");
-            const result = await sm.memories.forget({
-              containerTag: config.containerTag,
-              ...args.memoryId ? {
-                id: args.memoryId
-              } : {
-                content: args.content
-              },
-              ...args.reason ? {
-                reason: args.reason
-              } : {}
-            });
-            return {
-              content: JSON.stringify({
-                success: true,
-                result
-              })
-            };
-          }
-        });
-      });
-      await ctx.tool.transform((editor) => {
-        editor.add({
-          name: "update",
-          description: "Update a memory by creating a new version. Requires newContent plus memoryId or content.",
-          input: {
-            type: "object",
-            properties: {
-              memoryId: {
-                type: "string",
-                description: "Memory ID to update"
-              },
-              content: {
-                type: "string",
-                description: "Exact content to match when ID unknown"
-              },
-              newContent: {
-                type: "string",
-                description: "Replacement content"
-              }
-            },
-            required: ["newContent"],
-            additionalProperties: false
-          },
-          options: {
-            namespace: "supermemory"
-          },
-          execute: async (input, _tool) => {
-            const args = input;
-            const result = await sm.memories.updateMemory({
-              containerTag: config.containerTag,
-              newContent: args.newContent,
-              ...args.memoryId ? {
-                id: args.memoryId
-              } : {},
-              ...args.content ? {
-                content: args.content
-              } : {}
-            });
-            return {
-              content: JSON.stringify({
-                success: true,
-                result
-              })
-            };
-          }
-        });
-      });
-      await ctx.tool.transform((editor) => {
-        editor.add({
-          name: "list",
-          description: "Advanced browsing. List recent documents. Optional limit.",
-          input: {
-            type: "object",
-            properties: {
-              limit: {
-                type: "number",
-                description: "Max documents to return"
-              }
-            },
-            required: false,
-            additionalProperties: false
-          },
-          options: {
-            namespace: "supermemory"
-          },
-          execute: async (input, _tool) => {
-            const args = input;
-            const result = await sm.documents.list({
-              containerTags: [config.containerTag],
-              limit: args.limit ?? 10,
-              sort: "createdAt",
-              order: "desc"
-            });
-            return {
-              content: JSON.stringify({
-                success: true,
-                count: result.memories.length,
-                memories: result.memories.map((d) => ({
-                  id: d.id,
-                  customId: d.customId,
-                  title: d.title,
-                  summary: d.summary,
-                  type: d.type,
-                  status: d.status,
-                  createdAt: d.createdAt,
-                  updatedAt: d.updatedAt
-                }))
-              })
-            };
-          }
-        });
-      });
-      await ctx.tool.transform((editor) => {
-        editor.add({
-          name: "get",
-          description: "Advanced browsing. Retrieve a full document by ID. Requires documentId.",
-          input: {
-            type: "object",
-            properties: {
-              documentId: {
-                type: "string",
-                description: "Document ID to retrieve"
-              }
-            },
-            required: "documentId",
-            additionalProperties: false
-          },
-          options: {
-            namespace: "supermemory"
-          },
-          execute: async (input) => {
-            const args = input;
-            const result = await sm.documents.get(args.documentId);
-            return {
-              content: JSON.stringify({
-                success: true,
-                result
-              })
-            };
-          }
-        });
+          required: ["query"],
+          additionalProperties: false
+        },
+        options: { namespace: "supermemory" },
+        execute: wrapExecute("search", async (input) => {
+          const args = input;
+          const effectiveLimit = args.limit ?? config.maxMemories;
+          const results = await sm.search({
+            q: args.query,
+            containerTag: config.containerTag,
+            searchMode: SEARCH_MODE,
+            limit: effectiveLimit,
+            threshold: config.similarityThreshold,
+            rerank: args.rerank ?? config.rerank,
+            rewriteQuery: args.rewriteQuery ?? config.rewriteQuery,
+            aggregate: args.aggregate ?? config.aggregate,
+            include: { summaries: args.summaries ?? config.includeSummaries }
+          });
+          const n = results?.results?.length ?? 0;
+          return { content: JSON.stringify({ success: true, results }), resolved: { limit: effectiveLimit, threshold: config.similarityThreshold, returned: n } };
+        })
       });
     });
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "add",
+        description: "Save lasting facts, decisions, or setup details. Save on your own when something worth keeping appears.",
+        input: {
+          type: "object",
+          properties: {
+            content: { type: "string", description: "Durable fact or summary to store" },
+            filepath: { type: "string", description: "Optional source file path" },
+            metadata: { type: "object", description: "Optional metadata", additionalProperties: { type: ["string", "number", "boolean", "array"] } },
+            taskType: { type: "string", enum: ["memory", "superrag"], description: "memory (default) or superrag" }
+          },
+          required: ["content"],
+          additionalProperties: false
+        },
+        options: { namespace: "supermemory" },
+        execute: wrapExecute("add", async (input) => {
+          const args = input;
+          const results = await sm.add({
+            containerTag: config.containerTag,
+            content: args.content,
+            filepath: args.filepath,
+            taskType: args.taskType,
+            metadata: args.metadata
+          });
+          return { content: JSON.stringify({ success: true, results }), resolved: { chars: args.content.length, taskType: args.taskType ?? "memory" } };
+        })
+      });
+    });
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "remember",
+        description: "Save an exact user-stated fact. Use when the user says remember this.",
+        input: {
+          type: "object",
+          properties: {
+            content: { type: "string", description: "Exact fact text to store" },
+            metadata: { type: "object", description: "Optional metadata", additionalProperties: { type: "string" } }
+          },
+          required: ["content"],
+          additionalProperties: false
+        },
+        options: { namespace: "supermemory" },
+        execute: wrapExecute("remember", async (input) => {
+          const args = input;
+          const response = await fetch(`${config.baseUrl}/v4/memories`, {
+            method: "POST",
+            headers: apiHeaders,
+            body: JSON.stringify({
+              memories: [{ content: args.content, isStatic: false, metadata: { source: "opencode", ...args.metadata ?? {} } }],
+              containerTag: config.containerTag
+            })
+          });
+          if (!response.ok)
+            throw new Error(`Remember failed (${response.status}): ${await response.text()}`);
+          return { content: JSON.stringify({ success: true, result: await response.json() }), resolved: { chars: args.content.length } };
+        })
+      });
+    });
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "forget",
+        description: "Delete a stored memory. Only on explicit user request.",
+        input: {
+          type: "object",
+          properties: {
+            memoryId: { type: "string", description: "Memory ID to forget" },
+            content: { type: "string", description: "Exact content when ID unknown" },
+            reason: { type: "string", description: "Reason for forgetting" }
+          },
+          required: [],
+          additionalProperties: false
+        },
+        options: { namespace: "supermemory" },
+        execute: wrapExecute("forget", async (input) => {
+          const args = input;
+          if (!args.memoryId && !args.content)
+            throw new Error("memoryId or content is required");
+          const result = await sm.memories.forget({
+            containerTag: config.containerTag,
+            ...args.memoryId ? { id: args.memoryId } : { content: args.content },
+            ...args.reason ? { reason: args.reason } : {}
+          });
+          return { content: JSON.stringify({ success: true, result }), resolved: { memoryId: args.memoryId ?? null } };
+        })
+      });
+    });
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "update",
+        description: "Correct a stored memory. Only on explicit user request.",
+        input: {
+          type: "object",
+          properties: {
+            memoryId: { type: "string", description: "Memory ID to update" },
+            content: { type: "string", description: "Exact content when ID unknown" },
+            newContent: { type: "string", description: "Replacement content" }
+          },
+          required: ["newContent"],
+          additionalProperties: false
+        },
+        options: { namespace: "supermemory" },
+        execute: wrapExecute("update", async (input) => {
+          const args = input;
+          if (!args.memoryId && !args.content)
+            throw new Error("memoryId or content is required");
+          const result = await sm.memories.updateMemory({
+            containerTag: config.containerTag,
+            newContent: args.newContent,
+            ...args.memoryId ? { id: args.memoryId } : {},
+            ...args.content ? { content: args.content } : {}
+          });
+          return { content: JSON.stringify({ success: true, result }), resolved: { memoryId: args.memoryId ?? null } };
+        })
+      });
+    });
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "list",
+        description: "List recent stored documents. Use to browse before get.",
+        input: {
+          type: "object",
+          properties: { limit: { type: "number", description: "Max documents" } },
+          required: [],
+          additionalProperties: false
+        },
+        options: { namespace: "supermemory" },
+        execute: wrapExecute("list", async (input) => {
+          const args = input;
+          const result = await sm.documents.list({
+            containerTags: [config.containerTag],
+            limit: args.limit ?? config.maxMemories,
+            sort: "createdAt",
+            order: "desc"
+          });
+          return {
+            content: JSON.stringify({
+              success: true,
+              count: result.memories.length,
+              memories: result.memories.map((d) => ({
+                id: d.id,
+                customId: d.customId,
+                title: d.title,
+                summary: d.summary,
+                type: d.type,
+                status: d.status,
+                createdAt: d.createdAt,
+                updatedAt: d.updatedAt
+              }))
+            }),
+            resolved: { limit: args.limit ?? config.maxMemories, count: result.memories.length }
+          };
+        })
+      });
+    });
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "get",
+        description: "Open one stored document by ID. Use after list or search.",
+        input: {
+          type: "object",
+          properties: { documentId: { type: "string", description: "Document ID" } },
+          required: ["documentId"],
+          additionalProperties: false
+        },
+        options: { namespace: "supermemory" },
+        execute: wrapExecute("get", async (input) => {
+          const args = input;
+          const result = await sm.documents.get(args.documentId);
+          return { content: JSON.stringify({ success: true, result }), resolved: { documentId: args.documentId } };
+        })
+      });
+    });
+    fileLog("info", "setup complete: 7 tools registered, profile once per session + search per message");
   }
 });
 export {
