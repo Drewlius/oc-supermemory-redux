@@ -1,6 +1,6 @@
 {
   "name": "superMemory-Redux_OpenCode",
-  "version": "0.2.2",
+  "version": "0.3.2",
   "description": "Clean supermemory plugin for OpenCode — follows the docs, nothing more",
   "type": "module",
   "main": "dist/index.js",
