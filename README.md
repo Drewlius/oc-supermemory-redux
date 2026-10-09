@@ -1,4 +1,4 @@
-# superMemory-Redux_OpenCode
+# oc-supermemory-redux
 
 A focused [Supermemory](https://supermemory.ai/docs) plugin for OpenCode. It follows the current API contracts without legacy cross-editor tag discovery, custom compaction handling, or version-check banners.
 
@@ -21,13 +21,13 @@ OpenCode loads local plugins from its `plugins` configuration directory. The def
 
 ### Prebuilt Plugin
 
-The repository includes a self-contained `superMemory-Redux_OpenCode.js` bundle, so Bun is not required.
+The repository includes a self-contained `oc-supermemory-redux.js` bundle, so Bun is not required.
 
 ```sh
 mkdir -p "~/.config/opencode/plugins"
 curl -fsSL \
-  https://raw.githubusercontent.com/Drewlius/superMemory-Redux_OpenCode/main/superMemory-Redux_OpenCode.js \
-  -o "~/.config/opencode/plugins/superMemory-Redux_OpenCode.js"
+  https://raw.githubusercontent.com/Drewlius/oc-supermemory-redux/main/oc-supermemory-redux.js \
+  -o "~/.config/opencode/plugins/oc-supermemory-redux.js"
 ```
 
 Create the [configuration file](#configuration) at:
@@ -41,13 +41,13 @@ No entry in `opencode.jsonc` is required. OpenCode automatically discovers JavaS
 ### Build From Source
 
 ```sh
-git clone https://github.com/Drewlius/superMemory-Redux_OpenCode_OpenCode.git
-cd superMemory-Redux_OpenCode_OpenCode
+git clone https://github.com/Drewlius/oc-supermemory-redux_OpenCode.git
+cd oc-supermemory-redux_OpenCode
 bun install --frozen-lockfile
 bun run typecheck
 bun run build
 mkdir -p "~/.config/opencode/plugins"
-cp ./dist/index.js "~/.config/opencode/plugins/superMemory-Redux_OpenCode.js"
+cp ./dist/index.js "~/.config/opencode/plugins/oc-supermemory-redux.js"
 ```
 
 Then create the [configuration file](#configuration) at `~/.config/opencode/supermemory.jsonc`, or directly inside `OPENCODE_CONFIG_DIR` when that override is set.
@@ -141,7 +141,7 @@ bun run typecheck
 bun run build
 ```
 
-The build produces the self-contained `dist/index.js` bundle. Keep the top-level `superMemory-Redux_OpenCode.js` release artifact synchronized with that file.
+The build produces the self-contained `dist/index.js` bundle. Keep the top-level `oc-supermemory-redux.js` release artifact synchronized with that file.
 
 ## Patch Notes
 
