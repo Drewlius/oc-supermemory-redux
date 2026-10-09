@@ -1,26 +1,31 @@
 {
-  "name": "superMemory-Redux_OpenCode",
-  "version": "0.3.2",
-  "description": "Clean supermemory plugin for OpenCode — follows the docs, nothing more",
+  "name": "oc-supermemory-redux",
+  "version": "0.2.2",
+  "description": "Clean supermemory plugin for OpenCode — follows the docs, nothing more, best effort support for local and remote server, updated for supermemory v5",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "bun build ./src/index.ts --outdir ./dist --target node && tsc --emitDeclarationOnly",
+    "build:js": "bun build ./src/index.js --outfile ./oc-supermemory-redux.js --target node",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["opencode", "supermemory", "plugin", "memory"],
+  "keywords": [
+    "opencode",
+    "supermemory",
+    "plugin",
+    "memory"
+  ],
   "license": "MIT",
   "dependencies": {
     "@opencode/plugin": "latest",
-    "supermemory": "^4.0.0"
+    "jsonc-parser": "^3.3.1",
+    "oc-supermemory-redux": "/home/slippy/repos/worktrees/jolly-panda/",
+    "supermemory": "^5.0.0"
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "@types/node": "^26.6.4",
+    "bun-types": "^1.4.2",
     "typescript": "latest"
-  },
-  "opencode": {
-    "type": "plugin",
-    "hooks": ["chat.message"]
   }
 }

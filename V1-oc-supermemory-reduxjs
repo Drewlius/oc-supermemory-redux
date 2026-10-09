@@ -7127,25 +7127,6 @@ var FileContent = Struct({
   name: optional2(String5)
 }).annotate({ identifier: "Tool.FileContent" });
 var Content = Union2([TextContent, FileContent]).pipe(toTaggedUnion("type")).annotate({ identifier: "Tool.Content" });
-
-// node_modules/@opencode/schema/dist/session-metadata.js
-var SessionMetadata = Record(String5, Json2).annotate({
-  identifier: "Session.Metadata"
-});
-// node_modules/@opencode/schema/dist/session-provider-context.js
-var Provenance = Struct({
-  providerID: ID5,
-  provider: String5,
-  modelID: String5,
-  route: String5,
-  protocol: String5,
-  endpoint: String5
-}).annotate({ identifier: "Session.ProviderContext.Provenance" });
-var Info11 = Struct({
-  version: Literal2(1),
-  provenance: Provenance,
-  messages: Json2
-}).annotate({ identifier: "Session.ProviderContext" });
 // node_modules/@opencode/schema/dist/skill.js
 var ID11 = String5.pipe(brand2("Skill.ID"));
 var Name2 = String5.pipe(brand2("Skill.Name"));
@@ -7157,7 +7138,7 @@ var UrlSource = Struct({
   type: tag("url"),
   url: String5
 }).annotate({ identifier: "Skill.UrlSource" });
-var Info12 = Struct({
+var Info11 = Struct({
   id: ID11,
   name: Name2,
   description: String5.pipe(optional3),
@@ -7169,7 +7150,7 @@ var Updated9 = ephemeral({ type: "skill.updated", schema: {} });
 var Event11 = { Updated: Updated9, Definitions: inventory(Updated9) };
 var EmbeddedSource = Struct({
   type: tag("embedded"),
-  skill: suspend2(() => Info12)
+  skill: suspend2(() => Info11)
 }).annotate({ identifier: "Skill.EmbeddedSource" });
 var Source2 = Object.assign(Union2([DirectorySource, UrlSource, EmbeddedSource]).pipe(toTaggedUnion("type"), annotate2({ identifier: "Skill.Source" })), {
   equals: (a, b) => {
@@ -7238,6 +7219,25 @@ var Prompt = Struct({
     ...input.skills === undefined ? {} : { skills: input.skills }
   })
 })));
+
+// node_modules/@opencode/schema/dist/session-metadata.js
+var SessionMetadata = Record(String5, Json2).annotate({
+  identifier: "Session.Metadata"
+});
+// node_modules/@opencode/schema/dist/session-provider-context.js
+var Provenance = Struct({
+  providerID: ID5,
+  provider: String5,
+  modelID: String5,
+  route: String5,
+  protocol: String5,
+  endpoint: String5
+}).annotate({ identifier: "Session.ProviderContext.Provenance" });
+var Info12 = Struct({
+  version: Literal2(1),
+  provenance: Provenance,
+  messages: Json2
+}).annotate({ identifier: "Session.ProviderContext" });
 // node_modules/@opencode/schema/dist/shell.js
 var IDSchema3 = String5.check(isStartsWith("sh_")).pipe(brand2("Shell.ID"));
 var ID12 = IDSchema3.pipe(statics((schema) => {
@@ -7489,7 +7489,7 @@ var CompactionCompleted = Struct({
   providerState: ProviderState.pipe(optional3),
   summary: String5,
   recent: String5,
-  providerContext: Info11.pipe(optional3),
+  providerContext: Info12.pipe(optional3),
   ...CompactionUsage
 }).annotate({ identifier: "Session.Message.Compaction.Completed" });
 var CompactionFailed = Struct({
@@ -9300,7 +9300,7 @@ var readEnv = (env) => {
 };
 
 // node_modules/supermemory/client.mjs
-var __dirname = "/home/slippy/repos/superMemory-Redux_OpenCode/node_modules/supermemory";
+var __dirname = "/home/slippy/repos/worktrees/jolly-panda/node_modules/supermemory";
 var _Supermemory_instances;
 var _a;
 var _Supermemory_encoder;

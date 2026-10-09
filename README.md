@@ -149,15 +149,4 @@ The build produces the self-contained `dist/index.js` bundle. Keep the top-level
 - Toast error notifications are now gone and currently we are only logging errors/success through console.log
 - Memory injection is fully visible in the user space now you can fully verify what memories the model got or if they got them at all.
 - all supermemory sub commands: search, add, forget, update, list, get, docs, ect. now have individual mappings with a deeper explanation of their use case so your agent can more intelligently decide what tool to use and when to use it.
-- removed fallback strip to the profile and memories so it is important  to not set that too high now as we provide no defense against you injecting 20 or more memories per search query.
-
-## License
-
-MIT — see [LICENSE](./LICENSE).
-
-This project uses the official `supermemory` TypeScript SDK
-([Apache-2.0](https://github.com/supermemoryai/sdk-ts)) as a runtime
-dependency (`src/index.ts:2`, `package.json`). No upstream source files
-are vendored in `src/`; the SDK is inlined into the built bundle at
-build time. The project code remains MIT — no relicensing is required.
-MIT depending on an Apache-2.0 library is compatible.
+- removed fallback strip to the profile and memories so it is important  to not set that too high now as we provide no defense against you injecting 20 or more memories per search query. 

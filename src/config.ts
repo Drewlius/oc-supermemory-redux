@@ -1,234 +1,136 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { parse as parseJsonc, type ParseError } from "jsonc-parser/lib/esm/main.js";
+
+declare const process: {
+  env: Record<string, string | undefined>;
+};
 
 export interface Config {
-  apiKey: string;
+  SUPERMEMORY_API_KEY: string;
   baseUrl: string;
-  containerTag: string;
+  nameSpace: string;
   similarityThreshold: number;
   maxMemories: number;
   injectProfile: boolean;
-  entityContext: string;
+  supportingContext: string;
   rerank: boolean;
   rewriteQuery: boolean;
   aggregate: boolean;
   includeSummaries: boolean;
 }
 
-const DEFAULT_BASE_URL = "https://api.supermemory.ai";
-const CONFIG_DIR = process.env.OPENCODE_CONFIG_DIR?.trim() || join(homedir(), ".config", "opencode");
-const DEFAULT_ENTITY_CONTEXT = `Shared coding-agent memory for one user.
+const DIR = process.env.OPENCODE_CONFIG_DIR?.trim() || join(homedir(), ".config", "opencode");
 
+const DEFAULTS = {
+  baseUrl: "https://api.supermemory.ai",
+  nameSpace: "opencode",
+  similarityThreshold: 0.6,
+  maxMemories: 3,
+  injectProfile: true,
+  rerank: false,
+  rewriteQuery: false,
+  aggregate: false,
+  includeSummaries: false,
+  supportingContext: `Shared coding-agent memory for one user.
 EXTRACT:
 - User preferences, accepted decisions, durable workflows, actions, and learnings
 - Architecture, conventions, patterns, setup details
 - Decisions and their rationale
-
 SKIP:
 - Generic suggestions the user did not accept
 - Transient command output and low-value chatter
-- Granular details that do not help future work`;
+- Granular details that do not help future work`,
+};
 
-function loadConfigFile(): Record<string, unknown> | null {
-  return firstJson(["supermemory.jsonc", "supermemory.json"], true);
-}
+// API-key precedence, most-trusted first.  jsonc = allow // comments + trailing commas.
+const FILES: [string, boolean][] = [
+  ["supermemory-credentials.json", false],
+  ["supermemory.jsonc", true],
+  ["supermemory-credentials.jsonc", true],
+  ["supermemory.json", false],
+];
 
-function firstJson(names: string[], stripComments: boolean): Record<string, unknown> | null {
-  for (const name of names) {
-    const parsed = readJsonFile(join(CONFIG_DIR, name), stripComments);
-    if (parsed != undefined) return parsed;
-  }
-  return null;
-}
-
-function readJsonFile(path: string, stripComments: boolean): Record<string, unknown> | null {
-  if (!existsSync(path)) return null;          
+function read(name: string, jsonc: boolean): Record<string, unknown> | null {
+  const p = join(DIR, name);
+  if (!existsSync(p)) return null;
   try {
-    const raw = readFileSync(path, "utf-8");
-    return JSON.parse(stripComments ? stripJsoncComments(raw) : raw);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`Failed to parse ${path}: ${msg}`);
-  }
-}
-
-function stripJsoncComments(content: string): string {
-  let result = "";
-  let inString = false;
-  let escaped = false;
-  let i = 0;
-
-  while (i < content.length) {
-    const c = content[i];
-    const next = content[i + 1];
-
-    if (escaped) {
-      result += c;
-      escaped = false;
-      i++;
-      continue;
-    }
-
-    if (c === "\\" && inString) {
-      result += c;
-      escaped = true;
-      i++;
-      continue;
-    }
-
-    if (c === '"') {
-      inString = !inString;
-      result += c;
-      i++;
-      continue;
-    }
-
-    if (!inString && c === "/" && next === "/") {
-      while (i < content.length && content[i] !== "\n") i++;
-      result += "\n";
-      continue;
-    }
-
-    if (!inString && c === "/" && next === "*") {
-      i += 2;
-      while (i < content.length && !(content[i] === "*" && content[i + 1] === "/")) i++;
-      i += 2;
-      continue;
-    }
-
-    result += c;
-    i++;
-  }
-
-  return result.replace(/,(\s*[}\]])/g, "$1");
-}
-                                                                                          
-function requireKey(value: unknown, source: string): string {     /** Validates an API key from a given source and returns it normalized. */
-  if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`${source} must be a non-empty string`);
-  }
-  return value.trim();
-}
-
-function loadApiKey(fileConfig: Record<string, unknown> | null): string | undefined {
-  if (process.env.SUPERMEMORY_API_KEY !== undefined) {
-    return requireKey(process.env.SUPERMEMORY_API_KEY, "SUPERMEMORY_API_KEY");
-  }
-    if (fileConfig?.apiKey !== undefined) {
-      return requireKey(fileConfig.apiKey, "apiKey");
-  }
-
-  // failure and a bad apiKey reports as a validation failure, not both.
-  const creds = firstJson([
-    "supermemory-credentials.jsonc",
-    "supermemory-credentials.json",
-  ], false) as  { apiKey?: unknown } | null;
-  if (creds?.apiKey !== undefined) {
-    return requireKey(
-      creds.apiKey,
-      `apiKey in ${join(CONFIG_DIR, "supermemory-credentials.json")}`
-    );
-  }
-  return undefined;
-}
-
-export function loadConfig(): Config {
-  const fileConfig = loadConfigFile();
-  const apiKey = loadApiKey(fileConfig);
-
-  if (!apiKey) {
-    throw new Error(
-      "No Supermemory API key found. Set SUPERMEMORY_API_KEY env var, " +
-      "add apiKey to ~/.config/opencode/supermemory.jsonc, or create " +
-      "~/.config/opencode/supermemory-credentials.json with {\"apiKey\": \"sm_...\"}"
-    );
-  }
-
-  const containerTag = fileConfig?.containerTag ?? "opencode";
-  if (typeof containerTag !== "string" || !/^[a-zA-Z0-9_:-]{1,100}$/.test(containerTag)) {
-    throw new Error("containerTag must be 1-100 characters using letters, numbers, _, :, or -");
-  }
-
-  if (!fileConfig?.containerTag) {
-    console.warn(
-      `[oc-supermemory-redux] No containerTag set in config. ` +
-      `Using "${containerTag}" as fallback. Set containerTag in ` +
-      `~/.config/opencode/supermemory.jsonc to target your memory bucket.`
-    );
-  }
-
-  const baseUrl = fileConfig?.baseUrl ?? DEFAULT_BASE_URL;
-  if (typeof baseUrl !== "string") {
-    throw new Error("baseUrl must be a string");
-  }
-  const normalizedBaseUrl = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(baseUrl) ? baseUrl : `http://${baseUrl}`;
-  let parsedBaseUrl: URL;
-  try {
-    parsedBaseUrl = new URL(normalizedBaseUrl);
+    const raw = readFileSync(p, "utf-8");
+    const errors: ParseError[] = [];
+    const out: unknown = jsonc
+      ? parseJsonc(raw, errors, { allowTrailingComma: true })
+      : JSON.parse(raw);
+    if (jsonc && errors.length > 0) return null; // partial parse -> treat as absent
+    return (typeof out === "object" && out !== null && !Array.isArray(out))
+     ? (out as Record<string, unknown>)
+     : null;
   } catch {
-    throw new Error("baseUrl must be a valid URL");
+    return null;
   }
-  if (parsedBaseUrl.protocol !== "http:" && parsedBaseUrl.protocol !== "https:") {
-    throw new Error("baseUrl must use http or https");
-  }
+}
 
-  const similarityThreshold = fileConfig?.similarityThreshold ?? 0.6;
-  if (
-    typeof similarityThreshold !== "number" ||
-    !Number.isFinite(similarityThreshold) ||
-    similarityThreshold < 0 ||
-    similarityThreshold > 1
-  ) {
-    throw new Error("similarityThreshold must be a number between 0 and 1");
-  }
+function key(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
 
-  const maxMemories = fileConfig?.maxMemories ?? 3;
-if (typeof maxMemories !== "number" || !Number.isInteger(maxMemories) || maxMemories < 1 || maxMemories > 100) {
-    throw new Error("maxMemories must be an integer between 1 and 100");
-  }
+function isRange(v: unknown, min: number, max: number): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v >= min && v <= max;
+}
 
-  const injectProfile = fileConfig?.injectProfile ?? true;
-  if (typeof injectProfile !== "boolean") {
-    throw new Error("injectProfile must be a boolean");
-  }
+function isInt(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 100;
+}
 
-  const entityContext = fileConfig?.entityContext ?? DEFAULT_ENTITY_CONTEXT;
-  if (typeof entityContext !== "string" || entityContext.length > 1500) {
-    throw new Error("entityContext must be a string no longer than 1500 characters");
-  }
+function b(v: unknown, d: boolean): boolean {
+  return typeof v === "boolean" ? v : d;
+}
 
-  const rerank = fileConfig?.rerank ?? false;
-  if (typeof rerank !== "boolean") {
-    throw new Error("rerank must be a boolean");
+function url(v: unknown): string {
+  if (typeof v !== "string") return DEFAULTS.baseUrl;
+  const s = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(v) ? v : `http://${v}`;
+  try {
+    const u = new URL(s);
+    return (u.protocol === "http:" || u.protocol === `https:`)
+      ? u.toString().replace(/\/$/, "")
+      : DEFAULTS.baseUrl;
+  } catch {
+    return DEFAULTS.baseUrl;
   }
+}
 
-  const rewriteQuery = fileConfig?.rewriteQuery ?? false;
-  if (typeof rewriteQuery !== "boolean") {
-    throw new Error("rewriteQuery must be a boolean");
-  }
+function loadConfig(): Config {
+  const f = Object.fromEntries(FILES.map(([n, j]) => [n, read(n, j)]));
 
-  const aggregate = fileConfig?.aggregate ?? false;
-  if (typeof aggregate !== "boolean") {
-    throw new Error("aggregate must be a boolean");
-  }
+  const SUPERMEMORY_API_KEY =
+    key(process.env.SUPERMEMORY_API_KEY) ??
+    key(f["supermemory-credentials.json"]?.SUPERMEMORY_API_KEY) ??
+    key(f["supermemory.jsonc"]?.SUPERMEMORY_API_KEY) ??
+    key(f["supermemory-credentials.jsonc"]?.SUPERMEMORY_API_KEY) ??
+    key(f["supermemory.json"]?.SUPERMEMORY_API_KEY) ??
+    "dummy";
 
-  const includeSummaries = fileConfig?.includeSummaries ?? false;
-  if (typeof includeSummaries !== "boolean") {
-    throw new Error("includeSummaries must be a boolean");
-  }
-
+  const base = f["supermemory.jsonc"] ?? f["supermemory.json"] ?? {};
   return {
-    apiKey,
-    baseUrl: parsedBaseUrl.toString().replace(/\/$/, ""),
-    containerTag,
-    similarityThreshold,
-    maxMemories,
-    injectProfile,
-    entityContext,
-    rerank,
-    rewriteQuery,
-    aggregate,
-    includeSummaries,
+    SUPERMEMORY_API_KEY,
+    baseUrl: url(base.baseUrl),
+    nameSpace:
+      typeof base.nameSpace === "string" && /^[a-zA-Z0-9_:-]{1,100}$/.test(base.nameSpace)
+        ? base.nameSpace
+        : DEFAULTS.nameSpace,
+    similarityThreshold: isRange(base.similarityThreshold, 0, 1)
+      ? base.similarityThreshold
+      : DEFAULTS.similarityThreshold,
+    maxMemories: isInt(base.maxMemories) ? base.maxMemories : DEFAULTS.maxMemories,
+    injectProfile: b(base.injectProfile, DEFAULTS.injectProfile),
+    supportingContext:
+      typeof base.supportingContext === "string" && base.supportingContext.length <= 1500
+        ? base.supportingContext
+        : DEFAULTS.supportingContext,
+    rerank: b(base.rerank, DEFAULTS.rerank),
+    rewriteQuery: b(base.rewriteQuery, DEFAULTS.rewriteQuery),
+    aggregate: b(base.aggregate, DEFAULTS.aggregate),
+    includeSummaries: b(base.includeSummaries, DEFAULTS.includeSummaries),
   };
 }
+export const Config = loadConfig() 
