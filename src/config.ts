@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+﻿import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { parse as parseJsonc, type ParseError } from "jsonc-parser/lib/esm/main.js";
@@ -56,12 +56,11 @@ function read(name: string, jsonc: boolean): Record<string, unknown> | null {
   const p = join(DIR, name);
   if (!existsSync(p)) return null;
   try {
-    const raw = readFileSync(p, "utf-8");
+    const raw = readFileSync(p, "utf-8").replace(/^\uFEFF/, "");
     const errors: ParseError[] = [];
     const out: unknown = jsonc
       ? parseJsonc(raw, errors, { allowTrailingComma: true })
       : JSON.parse(raw);
-    if (jsonc && errors.length > 0) return null; // partial parse -> treat as absent
     return (typeof out === "object" && out !== null && !Array.isArray(out))
      ? (out as Record<string, unknown>)
      : null;
@@ -133,4 +132,4 @@ function loadConfig(): Config {
     includeSummaries: b(base.includeSummaries, DEFAULTS.includeSummaries),
   };
 }
-export const Config = loadConfig() 
+export const Config = loadConfig()

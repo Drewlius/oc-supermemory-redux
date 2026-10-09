@@ -40,8 +40,10 @@ export default Plugin.define({
   async setup(ctx) {
     fileLog("info", `Memory integration is starting up ${ctx.location.directory}`);
     const sm = new Supermemory({
-      environment: Config.SUPERMEMORY_API_KEY,
+      apiKey: Config.SUPERMEMORY_API_KEY,
       baseUrl: Config.baseUrl,
+      timeoutInSeconds: 8,
+      maxRetries: 0,
     }); 
     const apiHeaders = {
       "Authorization": `Bearer ${Config.SUPERMEMORY_API_KEY}`,
