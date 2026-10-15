@@ -81,42 +81,43 @@ The optional `entityContext` setting accepts a string up to 1,500 characters. If
 The first available API key is used:
 
 1. `SUPERMEMORY_API_KEY` environment variable
-2. `apiKey` in `supermemory.jsonc`
-3. `apiKey` in `supermemory-credentials.json`
+2. `SUPERMEMORY_API_KEY` in `supermemory.jsonc`
+3. `SUPERMEMORY_API_KEY` in `supermemory-credentials.json`
 
 Both configuration files belong in the OpenCode configuration directory. The plugin does not inspect configuration belonging to Claude, Codex, Cursor, or other applications.
 
 Invalid JSON, missing credentials, unsupported values, and unreachable back-end services produce console errors in OpenCode.log. Configuration validation includes:
 
-- `containerTag`: 1-100 supported characters
-- `similarityThreshold`: number from 0 to 1
-- `maxMemories`: integer from 1 to 100
-- `injectProfile`: boolean
-- `entityContext`: maximum 1,500 characters
-- `baseUrl`: valid HTTP or HTTPS URL
+- `baseUrl`: "https://supermemory.ai" -  valid HTTP or HTTPS URL - ( local server defaults to "http://localhost:6767" )
+- `SUPERMEMORY_API_KEY`: "<sm_your-key> 
+- `nameSpace`: string - 1-100 characters supported
+- `similarityThreshold`: number - from 0 to 1
+- `maxMemories`: integer - from 1 to 100
+- `injectProfile`: boolean - true or false
+- `supportingContext`: string - maximum 1,500 characters
+- `rewriteQuery`: boolean
 
 ## <div align="center"> How It Works
 ---
 
 ### Recall
 
-On the first user message for a session, the plugin calls `/v4/profile` with the user's message as the query. The response provides the static and dynamic profile plus query-specific search results in one request.
+On the first user message for a session, the plugin calls `profile` The response provides the static and dynamic profile and does not fire again unless you reload the session, restart OpenCode, or start a new session.
 
-Later messages call `/v4/search` in memories mode using the configured threshold and result limit. Retrieved context is injected as a synthetic `[SUPERMEMORY]` block.
+Later messages call `search` in memories mode using the configured threshold and result limit. Retrieved context is injected as a synthetic prompt and is invisible in user space.
 
 ### Conversation Ingestion
 
-On each user message, the plugin sends the previous assistant response and current user message as structured turns to `/v4/conversations`. The stable `conversationId` uses `session_<sessionID>`, allowing Supermemory to associate incremental updates with one conversation.
+On each user message, the plugin sends the previous assistant response and current user message as structured turns via `add` with a stable `id` and `dreaming: "dynamic"`. The stable `id` uses `session_<sessionID>`, allowing Supermemory to associate incremental document updates with one conversation.
 
 Recall and ingestion use separate failure paths. A failed profile or search request does not prevent conversation ingestion from being attempted.
 
-### Memory Tools
+### Agents Memory Tools
 
 - `add`: Creates a direct, non-static memory through `/v4/memories`.
-- `update`: Corrects an existing memory through `PATCH /v4/memories` while preserving version history.
 - `search`: Searches Supermemory using hybrid mode.
 - `profile`: Retrieves the configured container's profile.
-- `list`: Lists recent document metadata without downloading complete document content.
+- `list`: Lists recent documents.
 - `get`: Retrieves one complete document by ID.
 - `forget`: Soft-deletes a memory by ID or exact content.
 
@@ -129,7 +130,6 @@ Direct memories and conversation updates include `source: "opencode"` metadata f
 - No plugin-managed compaction
 - No version-check banner
 - No home-directory log file
-- No manual document-ingestion path while backend hybrid document retrieval remains unreliable
 
 OpenCode handles context-window management. Plugin diagnostics use OpenCode's structured logging and toast notifications.
 
@@ -145,8 +145,10 @@ The build produces the self-contained `dist/index.js` bundle. Keep the top-level
 
 ## Patch Notes
 
+- compatability update for supermemory api v5 and locally hosted `supermemory-server v0.0.9`
 - Migrated plugin to OpenCode V ^2.0 specification.
-- Toast error notifications are now gone and currently we are only logging errors/success through console.log
-- Memory injection is fully visible in the user space now you can fully verify what memories the model got or if they got them at all.
+- Toast error notifications are now gone and currently we are only logging errors/success through a dedicated log file at ~/.local/share/opencode/log/oc-supermemory-redux.log
+- memory and profile injections fire via synthetic message injections and are only visible to the agent, check the log file for verbose information or ask your agent.
 - all supermemory sub commands: search, add, forget, update, list, get, docs, ect. now have individual mappings with a deeper explanation of their use case so your agent can more intelligently decide what tool to use and when to use it.
-- removed fallback strip to the profile and memories so it is important  to not set that too high now as we provide no defense against you injecting 20 or more memories per search query. 
+- removed fallback strip to the profile and memories so it is important  to not set that too high now as we provide no defense against you injecting 20 or more memories per search query.
+- removed /v4/conversations ingestion pathway for per turn conversational ingestion as it is not available on the locally hosted binary. Instead writes to documents/add with a stable document `id`, provides near identical results. 
