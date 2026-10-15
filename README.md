@@ -6,12 +6,11 @@ A focused [Supermemory](https://supermemory.ai/docs) plugin for OpenCode. It fol
 
 - Fetches the configured container's profile on the first message of a session and includes search results for that message.
 - Searches for relevant memories on every later message.
-- Incrementally sends structured user and assistant turns to `/v4/conversations` under a stable conversation ID.
-- Uses one configurable `containerTag` for all reads and writes.
-- Creates direct memories through `/v4/memories` rather than document ingestion.
+- Incrementally sends structured user and assistant turns through the sdk `add` with a stable `id` previous versinos used /v4/conversatons/ that endpoint was not accessibleby the local supermemory-server.
+- Uses one configurable `nameSpace` for all reads and writes.
 - Provides `add`, `update`, `search`, `profile`, `list`, `get`, and `forget` tool modes.
 - Lists document metadata first and retrieves complete document content only when requested.
-- Synchronizes the configured `entityContext` with the container's settings.
+- Synchronizes the configured `supportingContext` with the container's settings.
 - Displays OpenCode toast notifications for invalid configuration and backend failures.
 - Keeps recall and conversation ingestion independent so one failing path does not block the other.
 
@@ -41,8 +40,8 @@ No entry in `opencode.jsonc` is required. OpenCode automatically discovers JavaS
 ### Build From Source
 
 ```sh
-git clone https://github.com/Drewlius/oc-supermemory-redux_OpenCode.git
-cd oc-supermemory-redux_OpenCode
+git clone https://github.com/Drewlius/oc-supermemory-redux.git
+cd oc-supermemory-redux
 bun install --frozen-lockfile
 bun run typecheck
 bun run build
@@ -61,20 +60,41 @@ Create `supermemory.jsonc` in your OpenCode configuration directory:
 ```jsonc
 {
   // Omit this when using SUPERMEMORY_API_KEY or the credentials file.
-  "apiKey": "sm_...",
+  "SUPERMEMORY_API_KEY": "sm_...",
 
   // One container for all plugin reads and writes.
-  "containerTag": "opencode",
+  "nameSpace": "opencode", // changeed from containerTag
 
   // Optional settings shown with their defaults.
   "baseUrl": "https://api.supermemory.ai",
   "similarityThreshold": 0.6,
   "maxMemories": 3,
   "injectProfile": true
+  "supportingContext": "Shared coding-agent memory for one user.
+EXTRACT:
+- User preferences, accepted decisions, durable workflows, actions, and learnings
+- Architecture, conventions, patterns, setup details
+- Decisions and their rationale
+SKIP:
+- Generic suggestions the user did not accept
+- Transient command output and low-value chatter
+- Granular details that do not help future work"
+- "rewriteQuery": true
 }
 ```
+Invalid JSON, missing credentials, unsupported values, and unreachable back-end services produce console errors in OpenCode.log. Configuration validation includes:
 
-The optional `entityContext` setting accepts a string up to 1,500 characters. If omitted, the plugin uses its built-in coding-agent context and synchronizes it with the configured container.
+- `baseUrl`: "https://supermemory.ai" -  valid HTTP or HTTPS URL - ( local server defaults to "http://localhost:6767" )
+- `SUPERMEMORY_API_KEY`: "<sm_your-key> 
+- `nameSpace`: string - 1-100 characters supported
+- `similarityThreshold`: number - from 0 to 1
+- `maxMemories`: integer - from 1 to 100
+- `injectProfile`: boolean - true or false
+- `supportingContext`: string - maximum 1,500 characters
+-  `rewriteQuery`: boolean
+
+The optional `supportingContext` setting accepts a string up to 1,500 characters. If omitted, the plugin uses its built-in coding-agent context and synchronizes it with the configured container.
+Invalid JSON, missing credentials, unsupported values, and unreachable back-end services produce console errors in OpenCode.log. Configuration validation includes:
 
 ### API Key Resolution
 
@@ -85,17 +105,6 @@ The first available API key is used:
 3. `SUPERMEMORY_API_KEY` in `supermemory-credentials.json`
 
 Both configuration files belong in the OpenCode configuration directory. The plugin does not inspect configuration belonging to Claude, Codex, Cursor, or other applications.
-
-Invalid JSON, missing credentials, unsupported values, and unreachable back-end services produce console errors in OpenCode.log. Configuration validation includes:
-
-- `baseUrl`: "https://supermemory.ai" -  valid HTTP or HTTPS URL - ( local server defaults to "http://localhost:6767" )
-- `SUPERMEMORY_API_KEY`: "<sm_your-key> 
-- `nameSpace`: string - 1-100 characters supported
-- `similarityThreshold`: number - from 0 to 1
-- `maxMemories`: integer - from 1 to 100
-- `injectProfile`: boolean - true or false
-- `supportingContext`: string - maximum 1,500 characters
-- `rewriteQuery`: boolean
 
 ## <div align="center"> How It Works
 ---
@@ -114,11 +123,10 @@ Recall and ingestion use separate failure paths. A failed profile or search requ
 
 ### Agents Memory Tools
 
-- `add`: Creates a direct, non-static memory through `/v4/memories`.
-- `search`: Searches Supermemory using hybrid mode.
-- `profile`: Retrieves the configured container's profile.
-- `list`: Lists recent documents.
-- `get`: Retrieves one complete document by ID.
+- `add`: Creates a direct, non-static memory through,
+- `search`: Searches Supermemory using hybrid mode,
+- `list`: Lists recent documents,
+- `get`: Retrieves one complete document by ID,
 - `forget`: Soft-deletes a memory by ID or exact content.
 
 Direct memories and conversation updates include `source: "opencode"` metadata for provenance. The plugin does not use metadata for routing or filtering.
