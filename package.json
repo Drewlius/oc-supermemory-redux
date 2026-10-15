@@ -1,7 +1,7 @@
 ﻿{
   "name": "oc-supermemory-redux",
-  "version": "0.2.2",
-  "description": "Clean supermemory plugin for OpenCode — follows the docs, nothing more, best effort support for local and remote server, updated for supermemory v5",
+  "version": "0.4.0",
+  "description": "Clean supermemory plugin for OpenCode — follows the docs, nothing more, best effort support for local and remote server, updated for supermemory v5 API and local supermemory-server v0.0.9, Opencode V2 supported and *NO* Opencode V1 backwards compatability, download earlier version for support for Opencode v1/supermemory api <= v4 supermemory-server <= v0.0.8",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

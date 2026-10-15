@@ -1,7 +1,7 @@
 ﻿import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { parse as parseJsonc, type ParseError } from "jsonc-parser/lib/esm/main.js";
+import { parse as parseJsonc } from "jsonc-parser/lib/esm/main.js";
 
 declare const process: {
   env: Record<string, string | undefined>;
@@ -15,10 +15,7 @@ export interface Config {
   maxMemories: number;
   injectProfile: boolean;
   supportingContext: string;
-  rerank: boolean;
   rewriteQuery: boolean;
-  aggregate: boolean;
-  includeSummaries: boolean;
 }
 
 const DIR = process.env.OPENCODE_CONFIG_DIR?.trim() || join(homedir(), ".config", "opencode");
@@ -29,9 +26,7 @@ const DEFAULTS = {
   similarityThreshold: 0.6,
   maxMemories: 3,
   injectProfile: true,
-  rerank: false,
   rewriteQuery: false,
-  aggregate: false,
   includeSummaries: false,
   supportingContext: `Shared coding-agent memory for one user.
 EXTRACT:
@@ -57,9 +52,8 @@ function read(name: string, jsonc: boolean): Record<string, unknown> | null {
   if (!existsSync(p)) return null;
   try {
     const raw = readFileSync(p, "utf-8").replace(/^\uFEFF/, "");
-    const errors: ParseError[] = [];
     const out: unknown = jsonc
-      ? parseJsonc(raw, errors, { allowTrailingComma: true })
+      ? parseJsonc(raw, undefined, { allowTrailingComma: true })
       : JSON.parse(raw);
     return (typeof out === "object" && out !== null && !Array.isArray(out))
      ? (out as Record<string, unknown>)
@@ -126,10 +120,7 @@ function loadConfig(): Config {
       typeof base.supportingContext === "string" && base.supportingContext.length <= 1500
         ? base.supportingContext
         : DEFAULTS.supportingContext,
-    rerank: b(base.rerank, DEFAULTS.rerank),
-    rewriteQuery: b(base.rewriteQuery, DEFAULTS.rewriteQuery),
-    aggregate: b(base.aggregate, DEFAULTS.aggregate),
-    includeSummaries: b(base.includeSummaries, DEFAULTS.includeSummaries),
-  };
+    rewriteQuery: b(base.rewriteQuery, DEFAULTS.rewriteQuery)
+  }
 }
 export const Config = loadConfig()

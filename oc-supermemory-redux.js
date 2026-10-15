@@ -88,6 +88,7 @@ var dual = function(arity, body) {
 };
 var identity = (a) => a;
 var constant = (value) => () => value;
+var constTrue = /* @__PURE__ */ constant(true);
 var constUndefined = /* @__PURE__ */ constant(undefined);
 var constVoid = constUndefined;
 function memoize(f) {
@@ -109,7 +110,9 @@ function memoizeIdempotent(f) {
       return cached;
     const result = f(a);
     cache.set(a, result);
-    cache.set(result, result);
+    if (result !== a) {
+      cache.set(result, result);
+    }
     return result;
   };
 }
@@ -137,6 +140,13 @@ var getAllObjectKeys = (obj) => {
   return keys;
 };
 var byReferenceInstances = /* @__PURE__ */ new WeakSet;
+var viewBytes = (view) => new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+
+// node_modules/effect/dist/internal/hash.js
+var backEdges = 0;
+var addBackEdge = () => {
+  backEdges++;
+};
 
 // node_modules/effect/dist/Predicate.js
 function isString(input) {
@@ -157,9 +167,6 @@ function isPropertyKey(u) {
 function isFunction(input) {
   return typeof input === "function";
 }
-function isNotUndefined(input) {
-  return input !== undefined;
-}
 function isNotNullish(input) {
   return input != null;
 }
@@ -178,25 +185,19 @@ function isError(input) {
 }
 
 // node_modules/effect/dist/Hash.js
-var symbol = "~effect/interfaces/Hash";
+var symbol = "~effect/Hash";
 var hash = (self2) => {
   switch (typeof self2) {
     case "number":
       return number(self2);
     case "bigint":
       return string(self2.toString(10));
-    case "boolean":
-      return string(String(self2));
-    case "symbol":
-      return string(String(self2));
     case "string":
       return string(self2);
-    case "undefined":
-      return string("undefined");
     case "function":
     case "object": {
       if (self2 === null) {
-        return string("null");
+        break;
       } else if (self2 instanceof Date) {
         if (Number.isNaN(self2.getTime())) {
           return string("Invalid Date");
@@ -208,60 +209,68 @@ var hash = (self2) => {
         if (byReferenceInstances.has(self2)) {
           return random(self2);
         }
-        if (hashCache.has(self2)) {
-          return hashCache.get(self2);
+        const cached = hashCache.get(self2);
+        if (cached !== undefined) {
+          return cached;
         }
-        const h = withVisitedTracking(self2, () => {
-          if (isHash(self2)) {
-            return self2[symbol]();
+        if (visitedObjects.has(self2)) {
+          addBackEdge();
+          return string("[Circular]");
+        }
+        visitedObjects.add(self2);
+        const seen = backEdges;
+        let h;
+        try {
+          if (symbol in self2) {
+            h = self2[symbol]();
           } else if (typeof self2 === "function") {
-            return random(self2);
+            h = random(self2);
           } else if (self2 instanceof DataView) {
-            return array(new Uint8Array(self2.buffer, self2.byteOffset, self2.byteLength));
+            h = array(viewBytes(self2));
           } else if (Array.isArray(self2) || ArrayBuffer.isView(self2)) {
-            return array(self2);
+            h = array(self2);
           } else if (self2 instanceof Map) {
-            return hashMap(self2);
+            h = hashMap(self2);
           } else if (self2 instanceof Set) {
-            return hashSet(self2);
+            h = hashSet(self2);
+          } else {
+            h = structure(self2);
           }
-          return structure(self2);
-        });
-        hashCache.set(self2, h);
+        } finally {
+          visitedObjects.delete(self2);
+        }
+        if (seen === backEdges) {
+          hashCache.set(self2, h);
+        }
         return h;
       }
     }
-    default:
-      throw new Error(`BUG: unhandled typeof ${typeof self2} - please report an issue at https://github.com/Effect-TS/effect/issues`);
   }
+  return optimize(mix(string(String(self2))));
 };
 var random = (self2) => {
   if (!randomHashCache.has(self2)) {
-    randomHashCache.set(self2, number(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)));
+    randomHashCache.set(self2, optimize(Math.random() * 4294967296 | 0));
   }
   return randomHashCache.get(self2);
 };
-var combine = /* @__PURE__ */ dual(2, (self2, b) => self2 * 53 ^ b);
+var mix = (h) => {
+  h ^= h >>> 16;
+  h = Math.imul(h, 2246822507);
+  h ^= h >>> 13;
+  h = Math.imul(h, 3266489909);
+  return h ^ h >>> 16;
+};
+var combine = /* @__PURE__ */ dual(2, (self2, b) => mix(Math.imul(self2, 2654435761) + Math.imul(b, 2246822507)));
 var optimize = (n) => n & 3221225471 | n >>> 1 & 1073741824;
-var isHash = (u) => hasProperty(u, symbol);
+var float64 = /* @__PURE__ */ new DataView(/* @__PURE__ */ new ArrayBuffer(8));
 var number = (n) => {
-  if (n !== n) {
-    return string("NaN");
+  const h = n | 0;
+  if (h === n) {
+    return optimize(h);
   }
-  if (n === Infinity) {
-    return string("Infinity");
-  }
-  if (n === -Infinity) {
-    return string("-Infinity");
-  }
-  let h = n | 0;
-  if (h !== n) {
-    h ^= n * 4294967295;
-  }
-  while (n > 4294967295) {
-    h ^= n /= 4294967295;
-  }
-  return optimize(h);
+  float64.setFloat64(0, n !== n ? NaN : n);
+  return optimize(combine(float64.getInt32(0), float64.getInt32(4)));
 };
 var string = (str) => {
   let h = 5381, i = str.length;
@@ -278,31 +287,29 @@ var structureKeys = (o, keys) => {
   return optimize(h);
 };
 var structure = (o) => structureKeys(o, getAllObjectKeys(o));
-var iterableWith = (seed, f) => (iter) => {
+var unordered = (seed, f) => (iter) => {
   let h = seed;
   for (const element of iter) {
     h ^= f(element);
   }
   return optimize(h);
 };
-var array = /* @__PURE__ */ iterableWith(6151, hash);
-var hashMap = /* @__PURE__ */ iterableWith(/* @__PURE__ */ string("Map"), ([k, v]) => combine(hash(k), hash(v)));
-var hashSet = /* @__PURE__ */ iterableWith(/* @__PURE__ */ string("Set"), hash);
+var array = (arr) => {
+  let h = 6151;
+  for (const element of arr) {
+    h = combine(h, hash(element));
+  }
+  return optimize(h);
+};
+var hashMap = /* @__PURE__ */ unordered(/* @__PURE__ */ string("Map"), ([k, v]) => combine(hash(k), hash(v)));
+var setSeed = /* @__PURE__ */ string("Set");
+var hashSet = /* @__PURE__ */ unordered(setSeed, (element) => combine(setSeed, hash(element)));
 var randomHashCache = /* @__PURE__ */ new WeakMap;
 var hashCache = /* @__PURE__ */ new WeakMap;
 var visitedObjects = /* @__PURE__ */ new WeakSet;
-function withVisitedTracking(obj, fn) {
-  if (visitedObjects.has(obj)) {
-    return string("[Circular]");
-  }
-  visitedObjects.add(obj);
-  const result = fn();
-  visitedObjects.delete(obj);
-  return result;
-}
 
 // node_modules/effect/dist/Equal.js
-var symbol2 = "~effect/interfaces/Equal";
+var symbol2 = "~effect/Equal";
 function equals() {
   if (arguments.length === 1) {
     return (self2) => compareBoth(self2, arguments[0]);
@@ -327,27 +334,38 @@ function compareBoth(self2, that) {
   if (byReferenceInstances.has(self2) || byReferenceInstances.has(that)) {
     return false;
   }
-  return withCache(self2, that, compareObjects);
+  return compareObjects(self2, that);
 }
-function withVisitedTracking2(self2, that, fn) {
-  const hasLeft = visitedLeft.has(self2);
-  const hasRight = visitedRight.has(that);
-  if (hasLeft && hasRight) {
-    return true;
+function compareObjects(self2, that) {
+  const depth = pathLeft.length;
+  for (let i = depth;i-- > 0; ) {
+    if (pathLeft[i] === self2 && pathRight[i] === that)
+      return true;
   }
-  if (hasLeft || hasRight) {
-    return false;
-  }
-  visitedLeft.add(self2);
-  visitedRight.add(that);
-  const result = fn();
-  visitedLeft.delete(self2);
-  visitedRight.delete(that);
+  if (depth)
+    return compareOnPath(self2, that);
+  let known = results.get(self2);
+  if (!known)
+    results.set(self2, known = new WeakMap);
+  let result = known.get(that);
+  if (result === undefined)
+    known.set(that, result = compareOnPath(self2, that));
   return result;
 }
-var visitedLeft = /* @__PURE__ */ new WeakSet;
-var visitedRight = /* @__PURE__ */ new WeakSet;
-function compareObjects(self2, that) {
+function compareOnPath(self2, that) {
+  pathLeft.push(self2);
+  pathRight.push(that);
+  try {
+    return compareStructure(self2, that);
+  } finally {
+    pathLeft.pop();
+    pathRight.pop();
+  }
+}
+var pathLeft = [];
+var pathRight = [];
+var results = /* @__PURE__ */ new WeakMap;
+function compareStructure(self2, that) {
   if (hash(self2) !== hash(that)) {
     return false;
   } else if (self2 instanceof Date) {
@@ -357,69 +375,40 @@ function compareObjects(self2, that) {
     const thatTime = that.getTime();
     return selfTime === thatTime || Number.isNaN(selfTime) && Number.isNaN(thatTime);
   } else if (self2 instanceof RegExp) {
-    if (!(that instanceof RegExp))
+    return that instanceof RegExp && self2.toString() === that.toString();
+  }
+  const bothEquals = isEqual(self2);
+  if (bothEquals !== isEqual(that) || typeof self2 === "function" && !bothEquals) {
+    return false;
+  } else if (bothEquals) {
+    return self2[symbol2](that);
+  } else if (Array.isArray(self2)) {
+    if (!Array.isArray(that) || self2.length !== that.length) {
       return false;
-    return self2.toString() === that.toString();
-  }
-  const selfIsEqual = isEqual(self2);
-  const thatIsEqual = isEqual(that);
-  if (selfIsEqual !== thatIsEqual)
-    return false;
-  const bothEquals = selfIsEqual && thatIsEqual;
-  if (typeof self2 === "function" && !bothEquals) {
-    return false;
-  }
-  return withVisitedTracking2(self2, that, () => {
-    if (bothEquals) {
-      return self2[symbol2](that);
-    } else if (Array.isArray(self2)) {
-      if (!Array.isArray(that) || self2.length !== that.length) {
-        return false;
-      }
-      return compareArrays(self2, that);
-    } else if (ArrayBuffer.isView(self2)) {
-      const selfIsDataView = self2 instanceof DataView;
-      if (!ArrayBuffer.isView(that) || self2.byteLength !== that.byteLength || selfIsDataView !== that instanceof DataView) {
-        return false;
-      }
-      if (selfIsDataView) {
-        const thatDataView = that;
-        return compareTypedArrays(new Uint8Array(self2.buffer, self2.byteOffset, self2.byteLength), new Uint8Array(thatDataView.buffer, thatDataView.byteOffset, thatDataView.byteLength));
-      }
-      return compareTypedArrays(self2, that);
-    } else if (self2 instanceof Map) {
-      if (!(that instanceof Map) || self2.size !== that.size) {
-        return false;
-      }
-      return compareMaps(self2, that);
-    } else if (self2 instanceof Set) {
-      if (!(that instanceof Set) || self2.size !== that.size) {
-        return false;
-      }
-      return compareSets(self2, that);
     }
-    return compareRecords(self2, that);
-  });
-}
-function withCache(self2, that, f) {
-  let selfMap = equalityCache.get(self2);
-  if (!selfMap) {
-    selfMap = new WeakMap;
-    equalityCache.set(self2, selfMap);
-  } else if (selfMap.has(that)) {
-    return selfMap.get(that);
+    return compareArrays(self2, that);
+  } else if (ArrayBuffer.isView(self2)) {
+    const selfIsDataView = self2 instanceof DataView;
+    if (!ArrayBuffer.isView(that) || self2.byteLength !== that.byteLength || selfIsDataView !== that instanceof DataView) {
+      return false;
+    }
+    if (selfIsDataView) {
+      return compareTypedArrays(viewBytes(self2), viewBytes(that));
+    }
+    return compareTypedArrays(self2, that);
+  } else if (self2 instanceof Map) {
+    if (!(that instanceof Map) || self2.size !== that.size) {
+      return false;
+    }
+    return compareHashed(self2, that, entryHash, equalEntries);
+  } else if (self2 instanceof Set) {
+    if (!(that instanceof Set) || self2.size !== that.size) {
+      return false;
+    }
+    return compareHashed(self2, that, hash, compareBoth);
   }
-  const result = f(self2, that);
-  selfMap.set(that, result);
-  let thatMap = equalityCache.get(that);
-  if (!thatMap) {
-    thatMap = new WeakMap;
-    equalityCache.set(that, thatMap);
-  }
-  thatMap.set(self2, result);
-  return result;
+  return compareRecords(self2, that);
 }
-var equalityCache = /* @__PURE__ */ new WeakMap;
 function compareArrays(self2, that) {
   for (let i = 0;i < self2.length; i++) {
     if (!compareBoth(self2[i], that[i])) {
@@ -452,50 +441,43 @@ function compareRecords(self2, that) {
   }
   return true;
 }
-function makeCompareMap(keyEquivalence, valueEquivalence) {
-  return function compareMaps(self2, that) {
-    const thatEntries = Array.from(that);
-    for (const [selfKey, selfValue] of self2) {
-      let found = false;
-      for (let i = 0;i < thatEntries.length; i++) {
-        const [thatKey, thatValue] = thatEntries[i];
-        if (keyEquivalence(selfKey, thatKey) && valueEquivalence(selfValue, thatValue)) {
-          thatEntries[i] = thatEntries[thatEntries.length - 1];
-          thatEntries.pop();
-          found = true;
-          break;
+function compareHashed(self2, that, hashOf, equivalent) {
+  const groups = new Map;
+  for (const item of that) {
+    const h = hashOf(item);
+    const group = groups.get(h);
+    if (group)
+      group.push(item);
+    else
+      groups.set(h, [item]);
+  }
+  outer:
+    for (const item of self2) {
+      const group = groups.get(hashOf(item));
+      if (group) {
+        for (let i = 0;i < group.length; i++) {
+          if (equivalent(item, group[i])) {
+            group[i] = group[group.length - 1];
+            group.pop();
+            continue outer;
+          }
         }
       }
-      if (!found) {
-        return false;
-      }
+      return false;
     }
-    return true;
-  };
+  return true;
 }
-var compareMaps = /* @__PURE__ */ makeCompareMap(compareBoth, compareBoth);
+var entryHash = (entry) => hash(entry[0]);
+var equalEntries = (self2, that) => compareBoth(self2[0], that[0]) && compareBoth(self2[1], that[1]);
+var sameGroup = () => 0;
+function makeCompareMap(keyEquivalence, valueEquivalence) {
+  return makeCompareSet((self2, that) => keyEquivalence(self2[0], that[0]) && valueEquivalence(self2[1], that[1]));
+}
 function makeCompareSet(equivalence) {
   return function compareSets(self2, that) {
-    const thatValues = Array.from(that);
-    for (const selfValue of self2) {
-      let found = false;
-      for (let i = 0;i < thatValues.length; i++) {
-        const thatValue = thatValues[i];
-        if (equivalence(selfValue, thatValue)) {
-          thatValues[i] = thatValues[thatValues.length - 1];
-          thatValues.pop();
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        return false;
-      }
-    }
-    return true;
+    return compareHashed(self2, that, sameGroup, equivalence);
   };
 }
-var compareSets = /* @__PURE__ */ makeCompareSet(compareBoth);
 var isEqual = (u) => hasProperty(u, symbol2);
 
 // node_modules/effect/dist/Redactable.js
@@ -539,6 +521,15 @@ function format(input, options) {
     }
   };
   function recur(v, d = 0) {
+    try {
+      return recurUnsafe(v, d);
+    } catch {
+      if (typeof v === "object" && v !== null || typeof v === "function")
+        ancestors.delete(v);
+      return "[inspection threw]";
+    }
+  }
+  function recurUnsafe(v, d = 0) {
     if (typeof v === "string")
       return JSON.stringify(v);
     if (typeof v === "number" || v == null || typeof v === "boolean" || typeof v === "symbol")
@@ -561,17 +552,17 @@ ${ind(d)}]`;
         output = formatDate(v);
       } else if (!options?.ignoreToString && hasProperty(v, "toString") && typeof v["toString"] === "function" && v["toString"] !== Object.prototype.toString && v["toString"] !== Array.prototype.toString) {
         const s = safeToString(v);
-        output = v instanceof Error && v.cause ? `${s} (cause: ${recur(v.cause, d)})` : s;
+        output = v instanceof Error && v.cause !== undefined ? `${s} (cause: ${recur(v.cause, d)})` : s;
       } else if (Symbol.iterator in v) {
         output = `${v.constructor.name}(${recur(Array.from(v), d)})`;
       } else {
         const keys = ownKeys(v);
         if (!gap || keys.length <= 1) {
-          const body = `{${keys.map((k) => `${formatPropertyKey(k)}:${recur(v[k], d)}`).join(",")}}`;
+          const body = `{${keys.map((k) => `${formatPropertyKey(k)}:${recur(safeGet(v, k), d)}`).join(",")}}`;
           output = wrap(v, body);
         } else {
           const body = `{
-${keys.map((k) => `${ind(d + 1)}${formatPropertyKey(k)}: ${recur(v[k], d + 1)}`).join(`,
+${keys.map((k) => `${ind(d + 1)}${formatPropertyKey(k)}: ${recur(safeGet(v, k), d + 1)}`).join(`,
 `)}
 ${ind(d)}}`;
           output = wrap(v, body);
@@ -603,6 +594,13 @@ function safeToString(input) {
     return "[toString threw]";
   }
 }
+function safeGet(input, key) {
+  try {
+    return input[key];
+  } catch {
+    return "[property access threw]";
+  }
+}
 function formatJson(input, options) {
   const ancestors = [];
   return JSON.stringify(input, function(key, value) {
@@ -614,6 +612,11 @@ function formatJson(input, options) {
     if (typeof redacted !== "object" || redacted === null) {
       return redacted;
     }
+    const current = redacted instanceof Error && !hasProperty(redacted, "toJSON") ? {
+      ...redacted,
+      name: redacted.name,
+      message: redacted.message
+    } : redacted;
     while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) {
       ancestors.pop();
     }
@@ -621,7 +624,10 @@ function formatJson(input, options) {
       return;
     }
     ancestors.push(redacted);
-    return redacted;
+    if (current !== redacted) {
+      ancestors.push(current);
+    }
+    return current;
   }, options?.space) ?? "null";
 }
 
@@ -652,24 +658,25 @@ var BaseProto = {
   }
 };
 
+// node_modules/effect/dist/internal/stackTraceLimit.js
+var getStackTraceLimit = () => Error.stackTraceLimit;
+
 // node_modules/effect/dist/Utils.js
 class SingleShotGen {
-  called = false;
-  self;
   constructor(self2) {
-    this.self = self2;
+    this.value = self2;
+    this.done = false;
   }
   next(a) {
-    return this.called ? {
-      value: a,
-      done: true
-    } : (this.called = true, {
-      value: this.self,
+    if (this.done) {
+      this.value = a;
+      return this;
+    }
+    this.done = true;
+    return {
+      value: this.value,
       done: false
-    });
-  }
-  [Symbol.iterator]() {
-    return new SingleShotGen(this.self);
+    };
   }
 }
 var pickInternalCall = () => {
@@ -686,7 +693,7 @@ var pickInternalCall = () => {
       } finally {}
     }
   };
-  const isNotOptimizedAway = standard[InternalTypeId](() => new Error().stack)?.includes(InternalTypeId) === true;
+  const isNotOptimizedAway = getStackTraceLimit() !== 0 && standard[InternalTypeId](() => new Error().stack)?.includes(InternalTypeId) === true;
   return isNotOptimizedAway ? standard[InternalTypeId] : forced[InternalTypeId];
 };
 var internalCall = /* @__PURE__ */ pickInternalCall();
@@ -784,8 +791,6 @@ var CauseTypeId = "~effect/Cause";
 var CauseReasonTypeId = "~effect/Cause/Reason";
 var isCause = (self2) => hasProperty(self2, CauseTypeId);
 class CauseImpl {
-  [CauseTypeId];
-  reasons;
   constructor(failures) {
     this[CauseTypeId] = CauseTypeId;
     this.reasons = failures;
@@ -856,7 +861,6 @@ class ReasonBase {
 var constEmptyAnnotations = /* @__PURE__ */ new Map;
 
 class Fail extends ReasonBase {
-  error;
   constructor(error, annotations = constEmptyAnnotations) {
     super("Fail", annotations, error);
     this.error = error;
@@ -878,10 +882,35 @@ class Fail extends ReasonBase {
   }
 }
 var causeFromReasons = (reasons) => new CauseImpl(reasons);
+var dedupeReasons = (self2, that) => {
+  const buckets = new Map;
+  const out = [];
+  for (const reason of self2.concat(that)) {
+    const hash2 = hash(reason);
+    const bucket = buckets.get(hash2);
+    if (bucket === undefined) {
+      buckets.set(hash2, [reason]);
+    } else if (bucket.some((previous) => equals(previous, reason))) {
+      continue;
+    } else {
+      bucket.push(reason);
+    }
+    out.push(reason);
+  }
+  return out;
+};
+var causeCombine = /* @__PURE__ */ dual(2, (self2, that) => {
+  if (self2.reasons.length === 0) {
+    return that;
+  } else if (that.reasons.length === 0) {
+    return self2;
+  }
+  const newCause = new CauseImpl(dedupeReasons(self2.reasons, that.reasons));
+  return equals(self2, newCause) ? self2 : newCause;
+});
 var causeFail = (error) => new CauseImpl([new Fail(error)]);
 
 class Die extends ReasonBase {
-  defect;
   constructor(defect, annotations = constEmptyAnnotations) {
     super("Die", annotations, defect);
     this.defect = defect;
@@ -924,10 +953,12 @@ var makePrimitiveProto = (options) => ({
 });
 var makePrimitive = (options) => {
   const Proto = makePrimitiveProto(options);
-  return function() {
-    const self2 = Object.create(Proto);
-    self2[args] = options.single === false ? arguments : arguments[0];
-    return self2;
+  const PrimitiveImpl = function(value) {
+    this[args] = value;
+  };
+  PrimitiveImpl.prototype = Proto;
+  return function(value) {
+    return new PrimitiveImpl(value);
   };
 };
 var makeExit = (options) => {
@@ -955,10 +986,12 @@ var makeExit = (options) => {
       return combine(string(options.op), hash(this[args]));
     }
   };
+  const ExitPrimitive = function(value) {
+    this[args] = value;
+  };
+  ExitPrimitive.prototype = Proto;
   return function(value) {
-    const self2 = Object.create(Proto);
-    self2[args] = value;
-    return self2;
+    return new ExitPrimitive(value);
   };
 };
 var exitSucceed = /* @__PURE__ */ makeExit({
@@ -981,15 +1014,25 @@ var exitFailCause = /* @__PURE__ */ makeExit({
   [evaluate](fiber) {
     let cause = this[args];
     let annotated = false;
-    if (fiber.currentStackFrame) {
+    if (fiber.cache.stackFrame) {
       cause = causeAnnotate(cause, {
-        mapUnsafe: new Map([[StackTraceKey.key, fiber.currentStackFrame]])
+        mapUnsafe: new Map([[StackTraceKey.key, fiber.cache.stackFrame]])
       });
       annotated = true;
     }
     let cont = fiber.getCont(contE);
-    while (fiber.interruptible && fiber._interruptedCause && cont) {
-      cont = fiber.getCont(contE);
+    const interruptedCause = fiber._interruptedCause;
+    if (interruptedCause && fiber.interruptible) {
+      let skippedHandler = false;
+      while (cont && fiber.interruptible) {
+        skippedHandler ||= identifier in cont;
+        cont = fiber.getCont(contE);
+      }
+      if (skippedHandler) {
+        cause = causeFromReasons(cause.reasons.filter((reason) => reason._tag !== "Fail"));
+      }
+      cause = causeCombine(cause, interruptedCause);
+      annotated = true;
     }
     return cont ? cont[contE](cause, fiber, annotated ? undefined : this) : fiber.yieldWith(annotated ? exitFailCause(cause) : this);
   }
@@ -1000,6 +1043,14 @@ var withFiber = /* @__PURE__ */ makePrimitive({
   op: "WithFiber",
   [evaluate](fiber) {
     return this[args](fiber);
+  }
+});
+var withFiberSucceed = /* @__PURE__ */ makePrimitive({
+  op: "WithFiberSucceed",
+  [evaluate](fiber) {
+    const value = this[args](fiber);
+    const cont = fiber.getCont(contA);
+    return cont ? cont[contA](value, fiber) : fiber.yieldWith(exitSucceed(value));
   }
 });
 var YieldableError = /* @__PURE__ */ function() {
@@ -1064,9 +1115,20 @@ var Prototype2 = (options) => makePrimitiveProto({
 var make = (isEquivalent) => (self2, that) => self2 === that || isEquivalent(self2, that);
 var isStrictEquivalent = (x, y) => x === y;
 var strictEqual = () => isStrictEquivalent;
+function Array_(item) {
+  return make((self2, that) => {
+    if (self2.length !== that.length)
+      return false;
+    for (let i = 0;i < self2.length; i++) {
+      if (!item(self2[i], that[i]))
+        return false;
+    }
+    return true;
+  });
+}
 
 // node_modules/effect/dist/internal/option.js
-var TypeId = "~effect/data/Option";
+var TypeId = "~effect/Option";
 var CommonProto = {
   [TypeId]: {
     _A: (_) => _
@@ -1125,14 +1187,14 @@ var isOption = (input) => hasProperty(input, TypeId);
 var isNone = (fa) => fa._tag === "None";
 var isSome = (fa) => fa._tag === "Some";
 var none = /* @__PURE__ */ Object.create(NoneProto);
-var some = (value) => {
-  const a = Object.create(SomeProto);
-  a.value = value;
-  return a;
+var SomeImpl = function(value) {
+  this.value = value;
 };
+SomeImpl.prototype = SomeProto;
+var some = (value) => new SomeImpl(value);
 
 // node_modules/effect/dist/internal/result.js
-var TypeId2 = "~effect/data/Result";
+var TypeId2 = "~effect/Result";
 var CommonProto2 = {
   [TypeId2]: {
     _A: (_) => _,
@@ -1186,16 +1248,16 @@ var FailureProto = /* @__PURE__ */ Object.assign(/* @__PURE__ */ Object.create(C
 var isResult = (input) => hasProperty(input, TypeId2);
 var isFailure = (result) => result._tag === "Failure";
 var isSuccess = (result) => result._tag === "Success";
-var fail = (failure) => {
-  const a = Object.create(FailureProto);
-  a.failure = failure;
-  return a;
+var FailureImpl = function(failure) {
+  this.failure = failure;
 };
-var succeed = (success) => {
-  const a = Object.create(SuccessProto);
-  a.success = success;
-  return a;
+FailureImpl.prototype = FailureProto;
+var fail = (failure) => new FailureImpl(failure);
+var SuccessImpl = function(success) {
+  this.success = success;
 };
+SuccessImpl.prototype = SuccessProto;
+var succeed = (success) => new SuccessImpl(success);
 
 // node_modules/effect/dist/Order.js
 function make2(compare) {
@@ -1231,7 +1293,6 @@ var liftThrowable = (f) => (...a) => {
     return none2();
   }
 };
-var map = /* @__PURE__ */ dual(2, (self2, f) => isNone2(self2) ? none2() : some2(f(self2.value)));
 var filter = /* @__PURE__ */ dual(2, (self2, predicate) => isNone2(self2) ? none2() : predicate(self2.value) ? some2(self2.value) : none2());
 
 // node_modules/effect/dist/Context.js
@@ -1323,7 +1384,7 @@ var lookup = (self2, key) => {
   const value = impl.base.get(key);
   if (value === undefined && !impl.base.has(key))
     return notFound;
-  if (impl.overlay && ++impl.baseHits >= FlattenAfterBaseHits) {
+  if (impl.overlay && ++impl.baseHits >= impl.base.size && impl.baseHits >= FlattenAfterBaseHits) {
     impl.base = flatten(impl);
     impl.overlay = undefined;
     impl.depth = 0;
@@ -1434,64 +1495,18 @@ var match2 = /* @__PURE__ */ dual(2, (self2, {
 
 // node_modules/effect/dist/Array.js
 var Array2 = globalThis.Array;
-var fromIterable = (collection) => Array2.isArray(collection) ? collection : Array2.from(collection);
 var append = /* @__PURE__ */ dual(2, (self2, last) => [...self2, last]);
-var appendAll = /* @__PURE__ */ dual(2, (self2, that) => fromIterable(self2).concat(fromIterable(that)));
 var isArray = Array2.isArray;
 var isArrayNonEmpty2 = isArrayNonEmpty;
 var isReadonlyArrayNonEmpty = isArrayNonEmpty;
-var hashBucketsAdd = (buckets, value) => {
-  const hash2 = hash(value);
-  const bucket = buckets.get(hash2);
-  if (bucket === undefined) {
-    buckets.set(hash2, [value]);
-    return true;
-  }
-  for (const previous of bucket) {
-    if (equals(previous, value)) {
-      return false;
-    }
-  }
-  bucket.push(value);
-  return true;
-};
-var union = /* @__PURE__ */ dual(2, (self2, that) => {
-  const a = fromIterable(self2);
-  const b = fromIterable(that);
-  if (isReadonlyArrayNonEmpty(a)) {
-    return isReadonlyArrayNonEmpty(b) ? dedupe(appendAll(a, b)) : a;
-  }
-  return b;
-});
 var empty2 = () => [];
-var map2 = /* @__PURE__ */ dual(2, (self2, f) => self2.map(f));
-var dedupe = (self2) => {
-  const input = fromIterable(self2);
-  if (input.length < 2) {
-    return [...input];
-  }
-  const buckets = new Map;
-  const out = [];
-  for (const value of input) {
-    if (hashBucketsAdd(buckets, value)) {
-      out.push(value);
-    }
-  }
-  return out;
-};
+var map = /* @__PURE__ */ dual(2, (self2, f) => self2.map(f));
 
 // node_modules/effect/dist/Scheduler.js
 var Scheduler = /* @__PURE__ */ Reference("effect/Scheduler", {
   fiberCached: true,
   defaultValue: () => new MixedScheduler
 });
-var setImmediate = "setImmediate" in globalThis ? (f) => {
-  const timer = globalThis.setImmediate(f);
-  return () => globalThis.clearImmediate(timer);
-} : (f) => {
-  const timer = setTimeout(f, 0);
-  return () => clearTimeout(timer);
-};
 var setMicrotask = (f) => {
   let cancelled = false;
   Promise.resolve().then(() => {
@@ -1501,6 +1516,20 @@ var setMicrotask = (f) => {
   return () => {
     cancelled = true;
   };
+};
+var setTimer = "setImmediate" in globalThis ? (f) => {
+  const timer = globalThis.setImmediate(f);
+  return () => globalThis.clearImmediate(timer);
+} : (f) => {
+  const timer = setTimeout(f, 0);
+  return () => clearTimeout(timer);
+};
+var setImmediate = (f) => {
+  try {
+    return setTimer(f);
+  } catch {
+    return setMicrotask(f);
+  }
 };
 
 class PriorityBuckets {
@@ -1538,7 +1567,7 @@ class MixedScheduler {
     this.setImmediate = setImmediateFn ?? (executionMode === "sync" ? setMicrotask : setImmediate);
   }
   shouldYield(fiber) {
-    return fiber.currentOpCount >= fiber.maxOpsBeforeYield;
+    return fiber.currentOpCount >= fiber.cache.maxOpsBeforeYield;
   }
   makeDispatcher() {
     return new MixedSchedulerDispatcher(this.setImmediate);
@@ -1601,92 +1630,11 @@ var Class2 = class extends Class {
 };
 var TaggedError2 = TaggedError;
 
-// node_modules/effect/dist/Encoding.js
+// node_modules/effect/dist/encoding/EncodingError.js
 var EncodingErrorTypeId = "~effect/encoding/EncodingError";
 
 class EncodingError extends (/* @__PURE__ */ TaggedError2("EncodingError")) {
   [EncodingErrorTypeId] = EncodingErrorTypeId;
-}
-var encodeBase64 = (input) => typeof input === "string" ? base64EncodeUint8Array(encoder.encode(input)) : base64EncodeUint8Array(input);
-var decodeBase64 = (str) => {
-  const stripped = stripCrlf(str);
-  const length = stripped.length;
-  if (length % 4 !== 0) {
-    return fail2(new EncodingError({
-      kind: "Decode",
-      module: "Base64",
-      input: stripped,
-      message: `Length must be a multiple of 4, but is ${length}`
-    }));
-  }
-  const index = stripped.indexOf("=");
-  if (index !== -1 && (index < length - 2 || index === length - 2 && stripped[length - 1] !== "=")) {
-    return fail2(new EncodingError({
-      kind: "Decode",
-      module: "Base64",
-      input: stripped,
-      message: `Found a '=' character, but it is not at the end`
-    }));
-  }
-  try {
-    const missingOctets = stripped.endsWith("==") ? 2 : stripped.endsWith("=") ? 1 : 0;
-    const result = new Uint8Array(3 * (length / 4) - missingOctets);
-    for (let i = 0, j = 0;i < length; i += 4, j += 3) {
-      const buffer = getBase64Code(stripped.charCodeAt(i)) << 18 | getBase64Code(stripped.charCodeAt(i + 1)) << 12 | getBase64Code(stripped.charCodeAt(i + 2)) << 6 | getBase64Code(stripped.charCodeAt(i + 3));
-      result[j] = buffer >> 16;
-      result[j + 1] = buffer >> 8 & 255;
-      result[j + 2] = buffer & 255;
-    }
-    return succeed2(result);
-  } catch (e) {
-    return fail2(new EncodingError({
-      kind: "Decode",
-      module: "Base64",
-      input: stripped,
-      message: e instanceof Error ? e.message : "Invalid input"
-    }));
-  }
-};
-var encoder = /* @__PURE__ */ new TextEncoder;
-var stripCrlf = (str) => str.replace(/[\n\r]/g, "");
-var base64EncodeUint8Array = (bytes) => {
-  const length = bytes.length;
-  let result = "";
-  let i;
-  for (i = 2;i < length; i += 3) {
-    result += base64abc[bytes[i - 2] >> 2];
-    result += base64abc[(bytes[i - 2] & 3) << 4 | bytes[i - 1] >> 4];
-    result += base64abc[(bytes[i - 1] & 15) << 2 | bytes[i] >> 6];
-    result += base64abc[bytes[i] & 63];
-  }
-  if (i === length + 1) {
-    result += base64abc[bytes[i - 2] >> 2];
-    result += base64abc[(bytes[i - 2] & 3) << 4];
-    result += "==";
-  }
-  if (i === length) {
-    result += base64abc[bytes[i - 2] >> 2];
-    result += base64abc[(bytes[i - 2] & 3) << 4 | bytes[i - 1] >> 4];
-    result += base64abc[(bytes[i - 1] & 15) << 2];
-    result += "=";
-  }
-  return result;
-};
-function getBase64Code(charCode) {
-  if (charCode >= base64codes.length) {
-    throw new TypeError(`Invalid character ${String.fromCharCode(charCode)}`);
-  }
-  const code = base64codes[charCode];
-  if (code === 255) {
-    throw new TypeError(`Invalid character ${String.fromCharCode(charCode)}`);
-  }
-  return code;
-}
-var base64abc = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "+", "/"];
-var base64codes = [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 62, 255, 255, 255, 63, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 255, 255, 255, 0, 255, 255, 255, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 255, 255, 255, 255, 255, 255, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51];
-var byteToHex = [];
-for (let i = 0;i < 256; i++) {
-  byteToHex.push(i.toString(16).padStart(2, "0"));
 }
 
 // node_modules/effect/dist/Tracer.js
@@ -1694,12 +1642,16 @@ var ParentSpanKey = "effect/Tracer/ParentSpan";
 var TracerKey = "effect/Tracer";
 
 // node_modules/effect/dist/internal/metric.js
-var FiberRuntimeMetricsKey = "effect/observability/Metric/FiberRuntimeMetricsKey";
+var FiberRuntimeMetricsKey = "effect/Metric/FiberRuntimeMetrics";
 
 // node_modules/effect/dist/internal/references.js
 var CurrentStackFrame = /* @__PURE__ */ Reference("effect/References/CurrentStackFrame", {
   fiberCached: true,
   defaultValue: constUndefined
+});
+var TracerEnabled = /* @__PURE__ */ Reference("effect/References/TracerEnabled", {
+  fiberCached: true,
+  defaultValue: constTrue
 });
 var CurrentLogLevel = /* @__PURE__ */ Reference("effect/References/CurrentLogLevel", {
   fiberCached: true,
@@ -1712,7 +1664,6 @@ var MinimumLogLevel = /* @__PURE__ */ Reference("effect/References/MinimumLogLev
 
 // node_modules/effect/dist/internal/effect.js
 class Interrupt extends ReasonBase {
-  fiberId;
   constructor(fiberId, annotations = constEmptyAnnotations) {
     super("Interrupt", annotations, "Interrupted");
     this.fiberId = fiberId;
@@ -1744,15 +1695,6 @@ var findError = (self2) => {
   return fail2(self2);
 };
 var hasInterrupts = (self2) => self2.reasons.some(isInterruptReason);
-var causeCombine = /* @__PURE__ */ dual(2, (self2, that) => {
-  if (self2.reasons.length === 0) {
-    return that;
-  } else if (that.reasons.length === 0) {
-    return self2;
-  }
-  const newCause = new CauseImpl(union(self2.reasons, that.reasons));
-  return equals(self2, newCause) ? self2 : newCause;
-});
 var causeMap = /* @__PURE__ */ dual(2, (self2, f) => {
   let hasFail = false;
   const failures = self2.reasons.map((failure) => {
@@ -1772,50 +1714,39 @@ var fiberVariance = {
 var fiberIdStore = {
   id: 0
 };
+var AsyncResource = /* @__PURE__ */ (() => {
+  try {
+    return globalThis.process?.getBuiltinModule?.("node:async_hooks")?.AsyncResource;
+  } catch {
+    return;
+  }
+})();
+var captureAsyncContext = () => AsyncResource === undefined ? undefined : new AsyncResource("effect/Fiber");
 var getCurrentFiber = () => globalThis[currentFiberTypeId];
 
 class FiberImpl {
   constructor(context, interruptible = true) {
-    this[FiberTypeId] = fiberVariance;
     this.setContext(context);
     this.id = ++fiberIdStore.id;
     this.currentOpCount = 0;
     this.interruptible = interruptible;
     this._stack = [];
-    this._observers = [];
+    this._observers = undefined;
     this._exit = undefined;
     this._children = undefined;
     this._interruptedCause = undefined;
     this._yielded = undefined;
     this._running = false;
     this._deferredInterrupt = false;
-    this.runtimeMetrics?.recordFiberStart(this.context);
+    this._parent = undefined;
+    this._asyncContext = undefined;
+    this.cache.runtimeMetrics?.recordFiberStart(this.context);
   }
-  [FiberTypeId];
-  id;
-  interruptible;
-  currentOpCount;
-  _stack;
-  _observers;
-  _exit;
-  _children;
-  _interruptedCause;
-  _yielded;
-  _running;
-  _deferredInterrupt;
-  context;
-  currentScheduler;
-  currentTracerContext;
-  currentSpan;
-  currentLogLevel;
-  minimumLogLevel;
-  currentStackFrame;
-  runtimeMetrics;
-  maxOpsBeforeYield;
-  currentPreventYield;
-  _dispatcher = undefined;
+  get [FiberTypeId]() {
+    return fiberVariance;
+  }
   get currentDispatcher() {
-    return this._dispatcher ??= this.currentScheduler.makeDispatcher();
+    return this._dispatcher ??= this.cache.scheduler.makeDispatcher();
   }
   getRef(ref) {
     return get(this.context, ref);
@@ -1825,23 +1756,28 @@ class FiberImpl {
       cb(this._exit);
       return constVoid;
     }
-    this._observers.push(cb);
-    return () => {
-      if (this._exit)
-        return;
-      const index = this._observers.indexOf(cb);
-      if (index >= 0) {
-        this._observers.splice(index, 1);
-      }
-    };
+    if (this._observers === undefined) {
+      this._observers = [cb];
+    } else {
+      this._observers.push(cb);
+    }
+    return () => this.removeObserver(cb);
+  }
+  removeObserver(cb) {
+    if (this._exit || this._observers === undefined)
+      return;
+    const index = this._observers.indexOf(cb);
+    if (index >= 0) {
+      this._observers.splice(index, 1);
+    }
   }
   interruptUnsafe(fiberId, annotations) {
     if (this._exit) {
       return;
     }
     let cause = causeInterrupt(fiberId);
-    if (this.currentStackFrame) {
-      cause = causeAnnotate(cause, make3(StackTraceKey, this.currentStackFrame));
+    if (this.cache.stackFrame) {
+      cause = causeAnnotate(cause, make3(StackTraceKey, this.cache.stackFrame));
     }
     if (annotations) {
       cause = causeAnnotate(cause, annotations);
@@ -1861,6 +1797,10 @@ class FiberImpl {
   evaluate(effect) {
     if (this._exit) {
       return;
+    } else if (this._asyncContext !== undefined) {
+      const asyncContext = this._asyncContext;
+      this._asyncContext = undefined;
+      return asyncContext.runInAsyncScope(this.evaluate, this, effect);
     } else if (this._yielded !== undefined) {
       const yielded = this._yielded;
       this._yielded = undefined;
@@ -1868,6 +1808,7 @@ class FiberImpl {
     }
     const exit = this.runLoop(effect);
     if (exit === Yield) {
+      this._asyncContext = captureAsyncContext();
       return;
     }
     const interruptChildren = fiberMiddleware.interruptChildren && fiberMiddleware.interruptChildren(this);
@@ -1875,11 +1816,18 @@ class FiberImpl {
       return this.evaluate(flatMap(interruptChildren, () => exit));
     }
     this._exit = exit;
-    this.runtimeMetrics?.recordFiberEnd(this.context, this._exit);
-    for (let i = 0;i < this._observers.length; i++) {
-      this._observers[i](exit);
+    this.cache.runtimeMetrics?.recordFiberEnd(this.context, this._exit);
+    if (this._parent) {
+      this._parent._children?.delete(this);
+      this._parent = undefined;
     }
-    this._observers.length = 0;
+    if (this._observers !== undefined) {
+      const observers = this._observers;
+      this._observers = undefined;
+      for (let i = 0;i < observers.length; i++) {
+        observers[i](exit);
+      }
+    }
     this._stack.length = 0;
     this._children = undefined;
     this.context = empty();
@@ -1899,12 +1847,13 @@ class FiberImpl {
           current = failCause(this._interruptedCause);
         }
         this.currentOpCount++;
-        if (!yielding && !this.currentPreventYield && this.currentScheduler.shouldYield(this)) {
+        const cache = this.cache;
+        if (!yielding && !cache.preventYield && cache.scheduler.shouldYield(this)) {
           yielding = true;
           const prev = current;
           current = flatMap(yieldNow, () => prev);
         }
-        current = this.currentTracerContext ? this.currentTracerContext(current, this) : current[evaluate](this);
+        current = cache.tracerContext ? cache.tracerContext(current, this) : current[evaluate](this);
         if (current === Yield) {
           const yielded = this._yielded;
           if (ExitTypeId in yielded) {
@@ -1938,14 +1887,24 @@ class FiberImpl {
       const op = this._stack.pop();
       if (!op)
         return;
-      const cont = op[contAll] && op[contAll](this);
-      if (cont) {
-        cont[symbol] = cont;
-        return cont;
+      const all = op[contAll];
+      if (all !== undefined) {
+        const cont = all.call(op, this);
+        if (cont) {
+          cont[symbol] = cont;
+          return cont;
+        }
       }
       if (op[symbol])
         return op;
     }
+  }
+  succeedWith(value) {
+    if ((++this.currentOpCount & maxInlineSteps - 1) === 0) {
+      return exitSucceed(value);
+    }
+    const cont = this.getCont(contA);
+    return cont ? cont[contA](value, this) : this.yieldWith(exitSucceed(value));
   }
   yieldWith(value) {
     this._yielded = value;
@@ -1962,25 +1921,34 @@ class FiberImpl {
     this.context = context;
     if (previous !== undefined && hasSameCache(previous, context))
       return;
-    const scheduler = this.getRef(Scheduler);
-    if (scheduler !== this.currentScheduler) {
-      this.currentScheduler = scheduler;
+    const root = context.cacheRoot;
+    const cache = root._fiberCache ??= makeFiberContextCache(context);
+    if (this.cache?.scheduler !== cache.scheduler) {
       this._dispatcher = undefined;
     }
-    this.currentSpan = getOrUndefinedUnsafe(context, ParentSpanKey);
-    this.currentLogLevel = this.getRef(CurrentLogLevel);
-    this.minimumLogLevel = this.getRef(MinimumLogLevel);
-    this.currentStackFrame = this.getRef(CurrentStackFrame);
-    this.maxOpsBeforeYield = this.getRef(MaxOpsBeforeYield);
-    this.currentPreventYield = this.getRef(PreventSchedulerYield);
-    this.runtimeMetrics = getOrUndefinedUnsafe(context, FiberRuntimeMetricsKey);
-    const currentTracer = getOrUndefinedUnsafe(context, TracerKey);
-    this.currentTracerContext = currentTracer ? currentTracer["context"] : undefined;
+    this.cache = cache;
   }
   get currentSpanLocal() {
-    return this.currentSpan?._tag === "Span" ? this.currentSpan : undefined;
+    const span = this.cache.span;
+    return span?._tag === "Span" ? span : undefined;
   }
 }
+var makeFiberContextCache = (context) => {
+  const currentTracer = getOrUndefinedUnsafe(context, TracerKey);
+  return {
+    scheduler: get(context, Scheduler),
+    tracer: currentTracer,
+    tracerContext: currentTracer ? currentTracer["context"] : undefined,
+    tracerEnabled: get(context, TracerEnabled),
+    span: getOrUndefinedUnsafe(context, ParentSpanKey),
+    logLevel: get(context, CurrentLogLevel),
+    minimumLogLevel: get(context, MinimumLogLevel),
+    stackFrame: get(context, CurrentStackFrame),
+    runtimeMetrics: getOrUndefinedUnsafe(context, FiberRuntimeMetricsKey),
+    maxOpsBeforeYield: get(context, MaxOpsBeforeYield),
+    preventYield: get(context, PreventSchedulerYield)
+  };
+};
 var deferredInterruptCont = {
   [contA](_value, fiber) {
     return failCause(fiber._interruptedCause);
@@ -1989,14 +1957,15 @@ var deferredInterruptCont = {
     return failCause(fiber._interruptedCause);
   }
 };
+var maxInlineSteps = 32;
 var fiberMiddleware = {
   interruptChildren: undefined
 };
 var fiberStackAnnotations = (fiber) => {
-  if (!fiber.currentStackFrame)
+  if (!fiber.cache.stackFrame)
     return;
   const annotations = new Map;
-  annotations.set(InterruptorStackTrace.key, fiber.currentStackFrame);
+  annotations.set(InterruptorStackTrace.key, fiber.cache.stackFrame);
   return makeUnsafe(annotations);
 };
 var fiberAwaitAll = (self2) => callback((resume) => {
@@ -2067,19 +2036,18 @@ var yieldNowWith = /* @__PURE__ */ makePrimitive({
   }
 });
 var yieldNow = /* @__PURE__ */ yieldNowWith(0);
-var succeedNone = /* @__PURE__ */ succeed3(/* @__PURE__ */ none2());
-var failCauseSync = (evaluate) => suspend(() => failCause(internalCall(evaluate)));
+var failCauseSync = (evaluate) => suspend(() => failCause(evaluate()));
 var die = (defect) => exitDie(defect);
-var failSync = (error) => suspend(() => fail3(internalCall(error)));
+var failSync = (error) => suspend(() => fail3(error()));
 var void_ = /* @__PURE__ */ succeed3(undefined);
 var try_ = (options) => {
   const evaluate = typeof options === "function" ? options : options.try;
   const catcher = typeof options === "function" ? (cause) => new UnknownError(cause, "An error occurred in Effect.try") : options.catch;
   return suspend(() => {
     try {
-      return succeed3(internalCall(evaluate));
+      return succeed3(evaluate());
     } catch (err) {
-      return fail3(internalCall(() => catcher(err)));
+      return fail3(catcher(err));
     }
   });
 };
@@ -2087,55 +2055,63 @@ var tryPromise = (options) => {
   const f = typeof options === "function" ? options : options.try;
   const catcher = typeof options === "function" ? (cause) => new UnknownError(cause, "An error occurred in Effect.tryPromise") : options.catch;
   return callbackOptions(function(resume, signal) {
-    const failWithCatch = (cause) => {
+    const failWithCatch = (cause) => suspend(() => {
       try {
-        resume(fail3(internalCall(() => catcher(cause))));
+        return fail3(internalCall(() => catcher(cause)));
       } catch (err) {
-        resume(die(err));
+        return die(err);
       }
-    };
+    });
     try {
-      internalCall(() => f(signal)).then((a) => resume(succeed3(a)), failWithCatch);
+      f(signal).then((a) => resume(succeed3(a)), (e) => resume(failWithCatch(e)));
     } catch (err) {
-      failWithCatch(err);
+      resume(failWithCatch(err));
     }
   }, f.length !== 0);
 };
-var callbackOptions = /* @__PURE__ */ makePrimitive({
-  op: "Async",
-  single: false,
-  [evaluate](fiber) {
-    const register = internalCall(() => this[args][0].bind(fiber.currentScheduler));
-    let resumed = false;
-    let yielded = false;
-    const controller = this[args][1] ? new AbortController : undefined;
-    const onCancel = register((effect) => {
-      if (resumed)
-        return;
-      resumed = true;
-      if (yielded) {
-        fiber.evaluate(effect);
-      } else {
-        yielded = effect;
+var callbackOptions = /* @__PURE__ */ function() {
+  const Proto = /* @__PURE__ */ makePrimitiveProto({
+    op: "Async",
+    [evaluate](fiber) {
+      let resumed = false;
+      let yielded = false;
+      const controller = this.withSignal ? new AbortController : undefined;
+      const onCancel = this.register.call(fiber.cache.scheduler, (effect) => {
+        if (resumed)
+          return;
+        resumed = true;
+        if (yielded) {
+          fiber.evaluate(effect);
+        } else {
+          yielded = effect;
+        }
+      }, controller?.signal);
+      if (yielded !== false)
+        return yielded;
+      yielded = true;
+      fiber._yielded = () => {
+        resumed = true;
+      };
+      if (controller === undefined && onCancel === undefined) {
+        return Yield;
       }
-    }, controller?.signal);
-    if (yielded !== false)
-      return yielded;
-    yielded = true;
-    fiber._yielded = () => {
-      resumed = true;
-    };
-    if (controller === undefined && onCancel === undefined) {
+      fiber._stack.push(asyncFinalizer(() => {
+        resumed = true;
+        controller?.abort();
+        return onCancel ?? exitVoid;
+      }));
       return Yield;
     }
-    fiber._stack.push(asyncFinalizer(() => {
-      resumed = true;
-      controller?.abort();
-      return onCancel ?? exitVoid;
-    }));
-    return Yield;
-  }
-});
+  });
+  const AsyncImpl = function(register, withSignal) {
+    this.register = register;
+    this.withSignal = withSignal;
+  };
+  AsyncImpl.prototype = Proto;
+  return function(register, withSignal) {
+    return new AsyncImpl(register, withSignal);
+  };
+}();
 var asyncFinalizer = /* @__PURE__ */ makePrimitive({
   op: "AsyncFinalizer",
   [contAll](fiber) {
@@ -2145,7 +2121,7 @@ var asyncFinalizer = /* @__PURE__ */ makePrimitive({
     }
   },
   [contE](cause, _fiber) {
-    return hasInterrupts(cause) ? flatMap(this[args](), () => failCause(cause)) : failCause(cause);
+    return hasInterrupts(cause) ? flatMap(combineFinalizerCause(exitFailCause(cause), this[args]()), () => failCause(cause)) : failCause(cause);
   }
 });
 var callback = (register) => callbackOptions(register, register.length >= 2);
@@ -2158,7 +2134,7 @@ var fnUntracedEager = (body, ...pipeables) => defineFunctionLength(body.length, 
 } : function() {
   let effect = fromIteratorEagerUnsafe(() => body.apply(this, arguments));
   for (const pipeable of pipeables) {
-    effect = pipeable(effect);
+    effect = pipeable(effect, ...arguments);
   }
   return effect;
 });
@@ -2193,51 +2169,82 @@ var fromIteratorEagerUnsafe = (evaluate) => {
     return die(error);
   }
 };
-var fromIteratorUnsafe = /* @__PURE__ */ makePrimitive({
-  op: "Iterator",
-  single: false,
-  [contA](value, fiber) {
-    const iter = this[args][0];
-    while (true) {
-      const state = iter.next(value);
-      if (state.done)
-        return succeed3(state.value);
-      if (!effectIsExit(state.value)) {
-        fiber._stack.push(this);
-        return state.value;
-      } else if (state.value._tag === "Failure") {
-        return state.value;
+var fromIteratorUnsafe = /* @__PURE__ */ function() {
+  const Proto = /* @__PURE__ */ makePrimitiveProto({
+    op: "Iterator",
+    [contA](value, fiber) {
+      const iter = this.iterator;
+      while (true) {
+        const state = iter.next(value);
+        if (state.done)
+          return succeed3(state.value);
+        if (!effectIsExit(state.value)) {
+          fiber._stack.push(this);
+          return state.value;
+        } else if (state.value._tag === "Failure") {
+          return state.value;
+        }
+        value = state.value.value;
       }
-      value = state.value.value;
+    },
+    [evaluate](fiber) {
+      return this[contA](this.initial, fiber);
     }
-  },
-  [evaluate](fiber) {
-    return this[contA](this[args][1], fiber);
-  }
-});
-var asVoid = (self2) => flatMap(self2, (_) => exitVoid);
-var flatMap = /* @__PURE__ */ dual(2, (self2, f) => {
-  const onSuccess = Object.create(OnSuccessProto);
-  onSuccess[args] = self2;
-  onSuccess[contA] = f.length !== 1 ? (a) => f(a) : f;
-  return onSuccess;
-});
+  });
+  const IteratorImpl = function(iterator, initial) {
+    this.iterator = iterator;
+    this.initial = initial;
+  };
+  IteratorImpl.prototype = Proto;
+  return function(iterator, initial) {
+    return new IteratorImpl(iterator, initial);
+  };
+}();
+var evaluateCont = function(fiber) {
+  fiber._stack.push(this);
+  return this[args];
+};
 var OnSuccessProto = /* @__PURE__ */ makePrimitiveProto({
   op: "OnSuccess",
-  [evaluate](fiber) {
-    fiber._stack.push(this);
-    return this[args];
-  }
+  [evaluate]: evaluateCont
 });
-var effectIsExit = (effect) => (ExitTypeId in effect);
+var ContImpl = function(self2, cont, payload) {
+  this[args] = self2;
+  this[contA] = cont;
+  this.payload = payload;
+};
+ContImpl.prototype = OnSuccessProto;
+var returnPayload = function() {
+  return this.payload;
+};
+var continuationMarksStack = /* @__PURE__ */ (() => {
+  const marker = "~effect/Effect/stackProbe";
+  const probe = {
+    [marker]: function stackProbe() {
+      return new Error().stack;
+    }
+  };
+  return probe[marker]()?.includes("[as " + marker + "]") === true;
+})();
+var mapCont = function(value, fiber) {
+  const f = this.payload;
+  return fiber.succeedWith(continuationMarksStack ? f(value) : internalCall(() => f(value)));
+};
+var andThenCont = function(value) {
+  const f = this.payload;
+  return f(value);
+};
+var asVoid = (self2) => new ContImpl(self2, returnPayload, exitVoid);
+var flatMap = /* @__PURE__ */ dual(2, (self2, f) => new ContImpl(self2, andThenCont, f));
+var effectIsExit = (effect) => effect[ExitTypeId] !== undefined;
 var flatMapEager = /* @__PURE__ */ dual(2, (self2, f) => {
   if (effectIsExit(self2)) {
     return self2._tag === "Success" ? f(self2.value) : self2;
   }
   return flatMap(self2, f);
 });
-var map4 = /* @__PURE__ */ dual(2, (self2, f) => flatMap(self2, (a) => succeed3(internalCall(() => f(a)))));
-var mapEager = /* @__PURE__ */ dual(2, (self2, f) => effectIsExit(self2) ? exitMap(self2, f) : map4(self2, f));
+var map2 = /* @__PURE__ */ dual(2, (self2, f) => new ContImpl(self2, mapCont, f));
+var mapEager = /* @__PURE__ */ dual(2, (self2, f) => effectIsExit(self2) ? exitMap(self2, f) : map2(self2, f));
 var mapErrorEager = /* @__PURE__ */ dual(2, (self2, f) => effectIsExit(self2) ? exitMapError(self2, f) : mapError(self2, f));
 var exitIsSuccess = (self2) => self2._tag === "Success";
 var exitVoid = /* @__PURE__ */ exitSucceed(undefined);
@@ -2250,32 +2257,32 @@ var exitMapError = /* @__PURE__ */ dual(2, (self2, f) => {
     return self2;
   return exitFail(f(error.success));
 });
-var catchCause = /* @__PURE__ */ dual(2, (self2, f) => {
-  const onFailure = Object.create(OnFailureProto);
-  onFailure[args] = self2;
-  onFailure[contE] = f.length !== 1 ? (cause) => f(cause) : f;
-  return onFailure;
-});
+var catchCause = /* @__PURE__ */ dual(2, (self2, f) => new OnFailureImpl(self2, f.length !== 1 ? (cause) => f(cause) : f));
 var OnFailureProto = /* @__PURE__ */ makePrimitiveProto({
   op: "OnFailure",
-  [evaluate](fiber) {
-    fiber._stack.push(this);
-    return this[args];
-  }
+  [evaluate]: evaluateCont
 });
+var OnFailureImpl = function(self2, f) {
+  this[args] = self2;
+  this[contE] = f;
+};
+OnFailureImpl.prototype = OnFailureProto;
 var catchCauseFilter = /* @__PURE__ */ dual(3, (self2, filter, f) => catchCause(self2, (cause) => {
   const eb = filter(cause);
-  return isFailure2(eb) ? failCause(eb.failure) : internalCall(() => f(eb.success, cause));
+  return isFailure2(eb) ? failCause(eb.failure) : f(eb.success, cause);
 }));
 var catch_ = /* @__PURE__ */ dual(2, (self2, f) => catchCauseFilter(self2, findError, (e) => f(e)));
 var mapError = /* @__PURE__ */ dual(2, (self2, f) => catch_(self2, (error) => failSync(() => f(error))));
 var OnSuccessAndFailureProto = /* @__PURE__ */ makePrimitiveProto({
   op: "OnSuccessAndFailure",
-  [evaluate](fiber) {
-    fiber._stack.push(this);
-    return this[args];
-  }
+  [evaluate]: evaluateCont
 });
+var OnSuccessAndFailureImpl = function(self2, onSuccess, onFailure) {
+  this[args] = self2;
+  this[contA] = onSuccess;
+  this[contE] = onFailure;
+};
+OnSuccessAndFailureImpl.prototype = OnSuccessAndFailureProto;
 var exit = (self2) => effectIsExit(self2) ? exitSucceed(self2) : exitPrimitive(self2);
 var exitPrimitive = /* @__PURE__ */ makePrimitive({
   op: "Exit",
@@ -2283,38 +2290,14 @@ var exitPrimitive = /* @__PURE__ */ makePrimitive({
     fiber._stack.push(this);
     return this[args];
   },
-  [contA](value, _, exit) {
-    return succeed3(exit ?? exitSucceed(value));
+  [contA](value, fiber, exit) {
+    return fiber.succeedWith(exit ?? exitSucceed(value));
   },
-  [contE](cause, _, exit) {
-    return succeed3(exit ?? exitFailCause(cause));
+  [contE](cause, fiber, exit) {
+    return fiber.succeedWith(exit ?? exitFailCause(cause));
   }
 });
 var combineFinalizerCause = (exit_, finalizer) => exitIsSuccess(exit_) ? finalizer : catchCause(finalizer, (cause) => failCause(causeCombine(exit_.cause, cause)));
-var onExitPrimitive = /* @__PURE__ */ makePrimitive({
-  op: "OnExit",
-  single: false,
-  [evaluate](fiber) {
-    fiber._stack.push(this);
-    return this[args][0];
-  },
-  [contAll](fiber) {
-    if (fiber.interruptible && this[args][2] !== true) {
-      fiber._stack.push(setInterruptibleTrue);
-      fiber.interruptible = false;
-    }
-  },
-  [contA](value, _, exit) {
-    exit ??= exitSucceed(value);
-    const eff = this[args][1](exit);
-    return eff ? flatMap(eff, (_) => exit) : exit;
-  },
-  [contE](cause, _, exit) {
-    exit ??= exitFailCause(cause);
-    const eff = this[args][1](exit);
-    return eff ? flatMap(combineFinalizerCause(exit, eff), (_) => exit) : exit;
-  }
-});
 var uninterruptible = (self2) => withFiber((fiber) => {
   if (!fiber.interruptible)
     return self2;
@@ -2350,61 +2333,43 @@ var whileLoop = /* @__PURE__ */ makePrimitive({
     return exitVoid;
   }
 });
-var iterateEagerImpl = (options) => {
+var resolveConcurrency = (concurrency) => concurrency === "unbounded" ? Number.POSITIVE_INFINITY : Math.max(1, concurrency ?? 1);
+var iterateEager = () => (options) => {
   const onItem = options.onItem;
   const step = options.step;
-  const runSequential = (state, items, index, end) => {
+  const resumeSequential = (state, items, index, end, effect) => flatMap(exit(effect), (itemExit) => step(state, items[index], itemExit, index) ?? runSequential(state, items, index + 1, end) ?? void_);
+  const runSequential = (state, items, index = 0, end = items.length) => {
     for (;index < end; index++) {
       const item = items[index];
       const effect = onItem(state, item, index);
       if (!effectIsExit(effect)) {
-        return flatMap(exit(effect), (itemExit) => step(state, item, itemExit, index) ?? runSequential(state, items, index + 1, end) ?? void_);
+        return resumeSequential(state, items, index, end, effect);
       }
       const terminal = step(state, item, effect, index);
       if (terminal)
         return terminal._tag === "Failure" ? terminal : undefined;
     }
   };
+  return runSequential;
+};
+var iterateConcurrentImpl = (options) => {
+  const onItem = options.onItem;
+  const step = options.step;
   return (state, items, opts) => {
     let index = 0;
-    const end = opts?.end ?? items.length;
-    const concurrency = opts?.concurrency ?? 1;
-    if (concurrency === 1) {
-      return runSequential(state, items, 0, end);
-    }
-    const orderedStep = opts?.orderedStep === true;
+    const end = opts.end ?? items.length;
+    const concurrency = opts.concurrency;
     let done = false;
     let parentFiber;
     let fibers;
     let resume;
-    let interrupted = false;
     let terminal;
     let effect;
-    let nextIndex = index;
-    const exits = orderedStep ? new Array(end) : undefined;
     const failDefect = (error) => {
       const defect = exitDie(error);
       terminal = defect;
       done = true;
-      interrupted = true;
-      return fibers && fibers.size > 0 ? flatMap(uninterruptible(fiberInterruptAll(Array.from(fibers))), () => defect) : defect;
-    };
-    const runStep = (item, exit, currentIndex) => {
-      if (!orderedStep)
-        return step(state, item, exit, currentIndex);
-      if (terminal)
-        return terminal;
-      exits[currentIndex] = exit;
-      while (nextIndex < end) {
-        const nextExit = exits[nextIndex];
-        if (nextExit === undefined)
-          return;
-        exits[nextIndex] = undefined;
-        const index = nextIndex++;
-        const result = step(state, items[index], nextExit, index);
-        if (result)
-          return result;
-      }
+      return fibers && fibers.size > 0 ? flatMap(uninterruptible(fiberInterruptAll(Array.from(fibers))), () => terminal ?? defect) : defect;
     };
     const go = () => {
       let paused = false;
@@ -2412,7 +2377,7 @@ var iterateEagerImpl = (options) => {
         const item = items[index];
         const eff = effect ?? onItem(state, item, index);
         if (effectIsExit(eff)) {
-          terminal = runStep(item, eff, index);
+          terminal = step(state, item, eff, index);
           if (terminal)
             break;
         } else if (!parentFiber) {
@@ -2430,16 +2395,15 @@ var iterateEagerImpl = (options) => {
             if (result)
               return cb(result);
             return suspend(() => {
-              terminal = exitVoid;
-              interrupted = true;
-              return fibers ? fiberInterruptAll(fibers) : void_;
+              terminal ??= exitVoid;
+              return flatMap(fibers ? fiberInterruptAll(fibers) : void_, () => terminal?._tag === "Failure" ? terminal : void_);
             });
           });
         } else {
           effect = undefined;
           const fiber = forkUnsafe(parentFiber, eff, true, true, "inherit");
           if (fiber._exit) {
-            terminal = runStep(item, fiber._exit, index);
+            terminal = step(state, item, fiber._exit, index);
             if (terminal)
               break;
             continue;
@@ -2450,21 +2414,17 @@ var iterateEagerImpl = (options) => {
             fibers.delete(fiber);
             try {
               if (terminal) {
-                if (!interrupted && exit._tag === "Failure") {
-                  for (const reason of exit.cause.reasons) {
-                    if (reason._tag === "Interrupt")
-                      continue;
-                    else if (terminal._tag === "Failure") {
-                      terminal.cause.reasons.push(reason);
-                    } else {
-                      terminal = exitFailCause(causeFromReasons([reason]));
-                    }
+                if (exit._tag === "Failure") {
+                  const reasons = exit.cause.reasons.filter((reason) => reason._tag !== "Interrupt");
+                  if (reasons.length > 0) {
+                    const cause = causeFromReasons(reasons);
+                    terminal = exitFailCause(terminal._tag === "Failure" ? causeCombine(terminal.cause, cause) : cause);
                   }
                 }
               } else {
-                const result = runStep(item, exit, currentIndex);
+                const result = step(state, item, exit, currentIndex);
                 if (result) {
-                  terminal = result._tag === "Failure" ? exitFailCause(causeFromReasons(result.cause.reasons.slice())) : result;
+                  terminal = result;
                   go();
                 }
               }
@@ -2507,7 +2467,7 @@ var iterateEagerImpl = (options) => {
     return go();
   };
 };
-var iterateEager = () => iterateEagerImpl;
+var iterateConcurrent = () => (options) => iterateConcurrentImpl(options);
 var forkUnsafe = (parent, effect, immediate = false, daemon = false, uninterruptible = false) => {
   const parentRuntime = parent;
   const interruptible = uninterruptible === "inherit" ? parentRuntime.interruptible : !uninterruptible;
@@ -2515,11 +2475,12 @@ var forkUnsafe = (parent, effect, immediate = false, daemon = false, uninterrupt
   if (immediate) {
     child.evaluate(effect);
   } else {
+    child._asyncContext = captureAsyncContext();
     parentRuntime.currentDispatcher.scheduleTask(() => child.evaluate(effect), 0);
   }
   if (!daemon && !child._exit) {
     parentRuntime.children().add(child);
-    child.addObserver(() => parentRuntime._children.delete(child));
+    child._parent = parentRuntime;
   }
   return child;
 };
@@ -2621,6 +2582,12 @@ var logLevelColors = {
   Fatal: [colors.bgBrightRed, colors.black]
 };
 
+// node_modules/effect/dist/Cause.js
+var isFailReason2 = isFailReason;
+var die2 = causeDie;
+var map3 = causeMap;
+var IllegalArgumentError2 = IllegalArgumentError;
+
 // node_modules/effect/dist/Exit.js
 var succeed4 = exitSucceed;
 var failCause2 = exitFailCause;
@@ -2628,14 +2595,9 @@ var fail4 = exitFail;
 var void_2 = exitVoid;
 var isSuccess3 = exitIsSuccess;
 
-// node_modules/effect/dist/Cause.js
-var isFailReason2 = isFailReason;
-var map5 = causeMap;
-var IllegalArgumentError2 = IllegalArgumentError;
-
 // node_modules/effect/dist/internal/dateTime.js
-var TypeId4 = "~effect/time/DateTime";
-var TimeZoneTypeId = "~effect/time/DateTime/TimeZone";
+var TypeId4 = "~effect/DateTime";
+var TimeZoneTypeId = "~effect/DateTime/TimeZone";
 var Proto2 = {
   [TypeId4]: TypeId4,
   pipe() {
@@ -2723,8 +2685,6 @@ var ProtoTimeZoneOffset = {
 var isDateTime = (u) => hasProperty(u, TypeId4);
 var isTimeZone = (u) => hasProperty(u, TimeZoneTypeId);
 var isUtc = (self2) => self2._tag === "Utc";
-var Equivalence = /* @__PURE__ */ make((a, b) => a.epochMilliseconds === b.epochMilliseconds);
-var Order = /* @__PURE__ */ make2((self2, that) => self2.epochMilliseconds < that.epochMilliseconds ? -1 : self2.epochMilliseconds > that.epochMilliseconds ? 1 : 0);
 var makeUtc = (epochMillis) => {
   const self2 = Object.create(ProtoUtc);
   self2.epochMilliseconds = epochMillis;
@@ -2776,7 +2736,7 @@ var toDate = (self2) => {
   const parts = self2.zone.format.formatToParts(self2.epochMilliseconds).filter((_) => _.type !== "literal");
   const date = new Date(0);
   date.setUTCFullYear(Number(parts[2].value), Number(parts[0].value) - 1, Number(parts[1].value));
-  date.setUTCHours(Number(parts[3].value), Number(parts[4].value), Number(parts[5].value), Number(parts[6].value));
+  date.setUTCHours(Number(parts[3].value), Number(parts[4].value), Number(parts[5].value), parts[6]?.type === "fractionalSecond" ? Number(parts[6].value) : (self2.epochMilliseconds % 1000 + 1000) % 1000);
   self2.adjustedEpochMilliseconds = date.getTime();
   return date;
 };
@@ -2797,14 +2757,8 @@ var offsetToString = (offset) => {
 var zonedOffsetIso = (self2) => offsetToString(zonedOffset(self2));
 var toEpochMillis = (self2) => self2.epochMilliseconds;
 var setPartsDate = (date, parts) => {
-  if (parts.year !== undefined) {
-    date.setUTCFullYear(parts.year);
-  }
-  if (parts.month !== undefined) {
-    date.setUTCMonth(parts.month - 1);
-  }
-  if (parts.day !== undefined) {
-    date.setUTCDate(parts.day);
+  if (parts.year !== undefined || parts.month !== undefined || parts.day !== undefined) {
+    date.setUTCFullYear(parts.year ?? date.getUTCFullYear(), parts.month !== undefined ? parts.month - 1 : date.getUTCMonth(), parts.day ?? date.getUTCDate());
   }
   if (parts.weekDay !== undefined) {
     const diff = parts.weekDay - date.getUTCDay();
@@ -2838,10 +2792,10 @@ var trim = (self2) => self2.trim();
 // node_modules/effect/dist/Effect.js
 var tryPromise2 = tryPromise;
 var succeed5 = succeed3;
-var succeedNone2 = succeedNone;
+var suspend2 = suspend;
 var fail5 = fail3;
 var failCauseSync2 = failCauseSync;
-var die2 = die;
+var die3 = die;
 var try_2 = try_;
 var fromResult2 = fromResult;
 var flatMap2 = flatMap;
@@ -2856,26 +2810,97 @@ var fnUntracedEager2 = fnUntracedEager;
 // node_modules/effect/dist/DateTime.js
 var isDateTime2 = isDateTime;
 var isUtc2 = isUtc;
-var Equivalence2 = Equivalence;
-var Order2 = Order;
-var fromDateUnsafe2 = fromDateUnsafe;
 var makeUnsafe3 = makeUnsafe2;
 var make5 = make4;
 var toUtc2 = toUtc;
-var toDateUtc2 = toDateUtc;
 var toEpochMillis2 = toEpochMillis;
 var formatIso2 = formatIso;
+
+// node_modules/effect/dist/encoding/Base64.js
+var encode = (input) => encodeBytes(typeof input === "string" ? encoder.encode(input) : input);
+var decode = (str) => {
+  const stripped = stripCrlf(str);
+  const length = stripped.length;
+  if (length % 4 !== 0) {
+    return fail2(new EncodingError({
+      kind: "Decode",
+      module: "Base64",
+      input: stripped,
+      message: `Length must be a multiple of 4, but is ${length}`
+    }));
+  }
+  const index = stripped.indexOf("=");
+  if (index !== -1 && (index < length - 2 || index === length - 2 && stripped[length - 1] !== "=")) {
+    return fail2(new EncodingError({
+      kind: "Decode",
+      module: "Base64",
+      input: stripped,
+      message: "Found a '=' character, but it is not at the end"
+    }));
+  }
+  try {
+    const missingOctets = stripped.endsWith("==") ? 2 : stripped.endsWith("=") ? 1 : 0;
+    const result = new Uint8Array(3 * (length / 4) - missingOctets);
+    for (let i = 0, j = 0;i < length; i += 4, j += 3) {
+      const buffer = getCode(stripped.charCodeAt(i)) << 18 | getCode(stripped.charCodeAt(i + 1)) << 12 | getCode(stripped.charCodeAt(i + 2)) << 6 | getCode(stripped.charCodeAt(i + 3));
+      result[j] = buffer >> 16;
+      result[j + 1] = buffer >> 8 & 255;
+      result[j + 2] = buffer & 255;
+    }
+    return succeed2(result);
+  } catch (cause) {
+    return fail2(new EncodingError({
+      kind: "Decode",
+      module: "Base64",
+      input: stripped,
+      message: cause instanceof Error ? cause.message : "Invalid input"
+    }));
+  }
+};
+var encodeBytes = (bytes) => {
+  const length = bytes.length;
+  let result = "";
+  let i;
+  for (i = 2;i < length; i += 3) {
+    result += alphabet[bytes[i - 2] >> 2];
+    result += alphabet[(bytes[i - 2] & 3) << 4 | bytes[i - 1] >> 4];
+    result += alphabet[(bytes[i - 1] & 15) << 2 | bytes[i] >> 6];
+    result += alphabet[bytes[i] & 63];
+  }
+  if (i === length + 1) {
+    result += alphabet[bytes[i - 2] >> 2];
+    result += alphabet[(bytes[i - 2] & 3) << 4];
+    result += "==";
+  }
+  if (i === length) {
+    result += alphabet[bytes[i - 2] >> 2];
+    result += alphabet[(bytes[i - 2] & 3) << 4 | bytes[i - 1] >> 4];
+    result += alphabet[(bytes[i - 1] & 15) << 2];
+    result += "=";
+  }
+  return result;
+};
+var encoder = /* @__PURE__ */ new TextEncoder;
+var stripCrlf = (str) => str.replace(/[\n\r]/g, "");
+var alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+var codes = /* @__PURE__ */ new Uint8Array(123).fill(255);
+for (let i = 0;i < alphabet.length; i++)
+  codes[/* @__PURE__ */ alphabet.charCodeAt(i)] = i;
+codes[61] = 0;
+var getCode = (charCode) => {
+  if (charCode >= codes.length || codes[charCode] === 255) {
+    throw new TypeError(`Invalid character ${String.fromCharCode(charCode)}`);
+  }
+  return codes[charCode];
+};
+
 // node_modules/effect/dist/internal/schema/annotations.js
 function resolve(ast) {
   return ast.checks ? ast.checks[ast.checks.length - 1].annotations : ast.annotations;
 }
-function resolveAt(key) {
-  return (ast) => resolve(ast)?.[key];
-}
 var STRUCTURAL_ANNOTATION_KEY = "~structural";
 var SENTINELS_ANNOTATION_KEY = "~sentinels";
 var CONSTRUCTOR_ANNOTATION_KEY = "~constructor";
-var resolveBrands = /* @__PURE__ */ resolveAt("brands");
 
 // node_modules/effect/dist/internal/schema/parser.js
 var missing = /* @__PURE__ */ Symbol();
@@ -2890,7 +2915,7 @@ var TypeId5 = "~effect/SchemaIssue/Issue";
 function isIssue(u) {
   return hasProperty(u, TypeId5) && u[TypeId5] === TypeId5;
 }
-class Base {
+class IssueNodeImpl {
   [TypeId5] = TypeId5;
   constructor(input, options) {
     if (options?.reportInput === true && input !== missing) {
@@ -2898,8 +2923,7 @@ class Base {
     }
   }
 }
-
-class Filter extends Base {
+var Filter = class extends IssueNodeImpl {
   _tag = "Filter";
   filter;
   issue;
@@ -2908,9 +2932,8 @@ class Filter extends Base {
     this.filter = filter;
     this.issue = issue;
   }
-}
-
-class Encoding extends Base {
+};
+var Encoding = class extends IssueNodeImpl {
   _tag = "Encoding";
   ast;
   issue;
@@ -2919,9 +2942,8 @@ class Encoding extends Base {
     this.ast = ast;
     this.issue = issue;
   }
-}
-
-class Pointer extends Base {
+};
+var Pointer = class extends IssueNodeImpl {
   _tag = "Pointer";
   path;
   issue;
@@ -2930,27 +2952,24 @@ class Pointer extends Base {
     this.path = path;
     this.issue = issue;
   }
-}
-
-class MissingKey extends Base {
+};
+var MissingKey = class extends IssueNodeImpl {
   _tag = "MissingKey";
   annotations;
   constructor(annotations) {
     super();
     this.annotations = annotations;
   }
-}
-
-class UnexpectedKey extends Base {
+};
+var UnexpectedKey = class extends IssueNodeImpl {
   _tag = "UnexpectedKey";
   ast;
   constructor(ast, input, options) {
     super(input, options);
     this.ast = ast;
   }
-}
-
-class Composite extends Base {
+};
+var Composite = class extends IssueNodeImpl {
   _tag = "Composite";
   ast;
   issues;
@@ -2959,26 +2978,32 @@ class Composite extends Base {
     this.ast = ast;
     this.issues = issues;
   }
-}
-
-class InvalidType extends Base {
+};
+var InvalidType = class extends IssueNodeImpl {
   _tag = "InvalidType";
   ast;
   constructor(ast, input, options) {
     super(input, options);
     this.ast = ast;
   }
-}
-
-class InvalidValue extends Base {
+};
+var InvalidValue = class extends IssueNodeImpl {
   _tag = "InvalidValue";
   annotations;
   constructor(annotations, input, options) {
     super(input, options);
     this.annotations = annotations;
   }
-}
-class AnyOf extends Base {
+};
+var Forbidden = class extends IssueNodeImpl {
+  _tag = "Forbidden";
+  annotations;
+  constructor(annotations, input, options) {
+    super(input, options);
+    this.annotations = annotations;
+  }
+};
+var AnyOf = class extends IssueNodeImpl {
   _tag = "AnyOf";
   ast;
   issues;
@@ -2987,9 +3012,8 @@ class AnyOf extends Base {
     this.ast = ast;
     this.issues = issues;
   }
-}
-
-class OneOf extends Base {
+};
+var OneOf = class extends IssueNodeImpl {
   _tag = "OneOf";
   ast;
   successes;
@@ -2998,7 +3022,7 @@ class OneOf extends Base {
     this.ast = ast;
     this.successes = successes;
   }
-}
+};
 function makeFilterIssue(entry, input, options) {
   if (isIssue(entry)) {
     return entry;
@@ -3027,7 +3051,7 @@ function normalizeFilterOutput(ast, out, input, options) {
     if (!isReadonlyArrayNonEmpty(out)) {
       return;
     }
-    return out.length === 1 ? makeFilterIssue(out[0], input, options) : new Composite(ast, map2(out, (entry) => makeFilterIssue(entry, input, options)), input, options);
+    return out.length === 1 ? makeFilterIssue(out[0], input, options) : new Composite(ast, map(out, (entry) => makeFilterIssue(entry, input, options)), input, options);
   }
   return makeSingle(out, input, options);
 }
@@ -3054,48 +3078,47 @@ function getSchemaIssueOrThrow(cause, message) {
 }
 
 // node_modules/effect/dist/SchemaGetter.js
-class Getter extends Class {
-  run;
-  constructor(run) {
-    super();
-    this.run = run;
-  }
-  map(f) {
-    return new Getter((oe, options) => this.run(oe, options).pipe(mapEager2(map(f))));
-  }
-  compose(other) {
-    if (isPassthrough(this)) {
-      return other;
-    }
-    if (isPassthrough(other)) {
-      return this;
-    }
-    return new Getter((oe, options) => this.run(oe, options).pipe(flatMapEager2((ot) => other.run(ot, options))));
-  }
+var makeGetter = (fields) => Object.assign(Object.create(Prototype), fields);
+function fail6(f) {
+  return transformOptionalEffect((oe, options) => fail5(f(oe, options)));
 }
-var passthrough_ = /* @__PURE__ */ new Getter(succeed5);
-function isPassthrough(getter) {
-  return getter.run === passthrough_.run;
+function forbidden(message) {
+  return fail6((oe, options) => {
+    const annotations = {
+      message: message(oe)
+    };
+    return isSome2(oe) ? new Forbidden(annotations, oe.value, options) : new Forbidden(annotations);
+  });
 }
+var forbiddenEncoding = /* @__PURE__ */ forbidden(() => "Encoding is not supported");
+var passthrough_ = /* @__PURE__ */ makeGetter({
+  _tag: "Passthrough"
+});
 function passthrough() {
   return passthrough_;
 }
-function onSome(f) {
-  return new Getter((oe, options) => isNone2(oe) ? succeedNone2 : f(oe.value, options));
-}
 function transform(f) {
-  return transformOptional(map(f));
+  return makeGetter({
+    _tag: "Transform",
+    transform: f
+  });
 }
-function transformOrFail(f) {
-  return onSome((e, options) => f(e, options).pipe(mapEager2(some2)));
+function transformEffect(f) {
+  return makeGetter({
+    _tag: "TransformEffect",
+    transform: f
+  });
 }
 function transformOptional(f) {
-  return new Getter((oe) => succeed5(f(oe)));
+  return makeGetter({
+    _tag: "TransformOptional",
+    transform: f
+  });
 }
-function withDefault(defaultValue) {
-  return new Getter((o) => {
-    const filtered = filter(o, isNotUndefined);
-    return isSome2(filtered) ? succeed5(filtered) : mapEager2(defaultValue, some2);
+function transformOptionalEffect(f) {
+  return makeGetter({
+    _tag: "TransformOptionalEffect",
+    transform: f
   });
 }
 function String3() {
@@ -3107,45 +3130,42 @@ function Number3() {
 function trim2() {
   return transform(trim);
 }
-function encodeBase642() {
-  return transform(encodeBase64);
+function encodeBase64() {
+  return transform(encode);
 }
-function decodeBase642() {
-  return transformOrFail((input, options) => mapErrorEager2(fromResult2(decodeBase64(input)), () => new InvalidValue({
+function decodeBase64() {
+  return transformEffect((input, options) => mapErrorEager2(fromResult2(decode(input)), () => new InvalidValue({
     expected: "a valid Base64 string"
   }, input, options)));
 }
 
 // node_modules/effect/dist/SchemaTransformation.js
 var TypeId6 = "~effect/SchemaTransformation/Transformation";
-
-class Transformation {
+var Transformation = class extends Class {
   [TypeId6] = TypeId6;
   _tag = "Transformation";
   decode;
   encode;
   constructor(decode, encode) {
+    super();
     this.decode = decode;
     this.encode = encode;
   }
   flip() {
     return new Transformation(this.encode, this.decode);
   }
-  compose(other) {
-    return new Transformation(this.decode.compose(other.decode), other.encode.compose(this.encode));
-  }
-}
+};
 function isTransformation(u) {
   return hasProperty(u, TypeId6) && u[TypeId6] === TypeId6;
 }
-var make6 = (options) => {
+var makeTransformation = (options) => {
   if (isTransformation(options)) {
     return options;
   }
   return new Transformation(options.decode, options.encode);
 };
-function transformOrFail2(options) {
-  return new Transformation(transformOrFail(options.decode), transformOrFail(options.encode));
+function transformEffect2(options) {
+  return new Transformation(transformEffect(options.decode), transformEffect(options.encode));
 }
 function transform2(options) {
   return new Transformation(transform(options.decode), transform(options.encode));
@@ -3212,24 +3232,13 @@ var defectFromJson = (options) => transform2({
   decode: decodeDefect,
   encode: makeEncodeDefect(options)
 });
-var urlFromString = /* @__PURE__ */ transformOrFail2({
+var urlFromString = /* @__PURE__ */ transformEffect2({
   decode: (s, options) => URL.canParse(s) ? succeed5(new URL(s)) : fail5(new InvalidValue({
     expected: "a valid URL string"
   }, s, options)),
   encode: (url) => succeed5(url.href)
 });
-var uint8ArrayFromBase64String = /* @__PURE__ */ new Transformation(/* @__PURE__ */ decodeBase642(), /* @__PURE__ */ encodeBase642());
-var dateTimeUtcFromString = /* @__PURE__ */ transformOrFail2({
-  decode: (s, options) => {
-    return match(make5(s), {
-      onNone: () => fail5(new InvalidValue({
-        expected: "a valid UTC DateTime string"
-      }, s, options)),
-      onSome: (result) => succeed5(toUtc2(result))
-    });
-  },
-  encode: (utc) => succeed5(formatIso2(utc))
-});
+var uint8ArrayFromBase64String = /* @__PURE__ */ new Transformation(/* @__PURE__ */ decodeBase64(), /* @__PURE__ */ encodeBase64());
 
 // node_modules/effect/dist/SchemaAST.js
 function makeGuard(tag) {
@@ -3243,18 +3252,16 @@ var isArrays = /* @__PURE__ */ makeGuard("Arrays");
 var isObjects = /* @__PURE__ */ makeGuard("Objects");
 var isUnion = /* @__PURE__ */ makeGuard("Union");
 var isSuspend = /* @__PURE__ */ makeGuard("Suspend");
-
-class Link {
+var Link = class {
   to;
   transformation;
   constructor(to, transformation) {
     this.to = to;
     this.transformation = transformation;
   }
-}
+};
 var defaultParseOptions = {};
-
-class Context {
+var Context = class {
   isOptional;
   isMutable;
   constructorDefault;
@@ -3265,10 +3272,10 @@ class Context {
     this.constructorDefault = constructorDefault;
     this.annotations = annotations;
   }
-}
+};
 var TypeId7 = "~effect/Schema";
 
-class Base2 {
+class ASTNodeImpl {
   [TypeId7] = TypeId7;
   annotations;
   checks;
@@ -3284,8 +3291,7 @@ class Base2 {
     return `<${this._tag}>`;
   }
 }
-
-class Declaration extends Base2 {
+var Declaration = class extends ASTNodeImpl {
   _tag = "Declaration";
   typeParameters;
   run;
@@ -3322,9 +3328,8 @@ class Declaration extends Base2 {
       return expected;
     return "<Declaration>";
   }
-}
-
-class Null extends Base2 {
+};
+var Null = class extends ASTNodeImpl {
   _tag = "Null";
   getParser() {
     return fromConst(this, null);
@@ -3332,9 +3337,9 @@ class Null extends Base2 {
   getExpected() {
     return "null";
   }
-}
+};
 var null_ = /* @__PURE__ */ new Null;
-class Undefined extends Base2 {
+var Undefined = class extends ASTNodeImpl {
   _tag = "Undefined";
   getParser() {
     return fromConst(this, undefined);
@@ -3345,12 +3350,12 @@ class Undefined extends Base2 {
   getExpected() {
     return "undefined";
   }
-}
+};
 var undefinedToNull = /* @__PURE__ */ new Link(null_, /* @__PURE__ */ new Transformation(/* @__PURE__ */ transform(() => {
   return;
 }), /* @__PURE__ */ transform(() => null)));
 var undefined_2 = /* @__PURE__ */ new Undefined;
-class Any extends Base2 {
+var Any = class extends ASTNodeImpl {
   _tag = "Any";
   getParser() {
     return fromRefinement(this, isUnknown);
@@ -3358,10 +3363,9 @@ class Any extends Base2 {
   getExpected() {
     return "any";
   }
-}
+};
 var any = /* @__PURE__ */ new Any;
-
-class Unknown extends Base2 {
+var Unknown = class extends ASTNodeImpl {
   _tag = "Unknown";
   getParser() {
     return fromRefinement(this, isUnknown);
@@ -3369,9 +3373,9 @@ class Unknown extends Base2 {
   getExpected() {
     return "unknown";
   }
-}
+};
 var unknown = /* @__PURE__ */ new Unknown;
-class Literal extends Base2 {
+var Literal = class extends ASTNodeImpl {
   _tag = "Literal";
   literal;
   constructor(literal, annotations, checks, encoding, context) {
@@ -3396,13 +3400,12 @@ class Literal extends Base2 {
   getExpected() {
     return typeof this.literal === "string" ? JSON.stringify(this.literal) : globalThis.String(this.literal);
   }
-}
+};
 function literalToString(ast) {
   const literalAsString = globalThis.String(ast.literal);
   return replaceEncoding(ast, [new Link(new Literal(literalAsString), new Transformation(transform(() => ast.literal), transform(() => literalAsString)))]);
 }
-
-class String4 extends Base2 {
+var String4 = class extends ASTNodeImpl {
   _tag = "String";
   getParser() {
     return fromRefinement(this, isString);
@@ -3414,10 +3417,9 @@ class String4 extends Base2 {
   getExpected() {
     return "string";
   }
-}
+};
 var string2 = /* @__PURE__ */ new String4;
-
-class Number4 extends Base2 {
+var Number4 = class extends ASTNodeImpl {
   _tag = "Number";
   getParser() {
     return fromRefinement(this, isNumber);
@@ -3451,13 +3453,12 @@ class Number4 extends Base2 {
   getExpected() {
     return "number";
   }
-}
+};
 function hasCheck(checks, id) {
   return checks.some((check) => check.annotations?.representation?.id === id || check._tag === "FilterGroup" && hasCheck(check.checks, id));
 }
 var number2 = /* @__PURE__ */ new Number4;
-
-class Boolean2 extends Base2 {
+var Boolean = class extends ASTNodeImpl {
   _tag = "Boolean";
   getParser() {
     return fromRefinement(this, isBoolean);
@@ -3465,9 +3466,9 @@ class Boolean2 extends Base2 {
   getExpected() {
     return "boolean";
   }
-}
-var boolean = /* @__PURE__ */ new Boolean2;
-class Arrays extends Base2 {
+};
+var boolean = /* @__PURE__ */ new Boolean;
+var Arrays = class extends ASTNodeImpl {
   _tag = "Arrays";
   isMutable;
   elements;
@@ -3496,7 +3497,7 @@ class Arrays extends Base2 {
       }
     }
   }
-  getParser(compile, compileConstructorDefault = compile) {
+  getParser(compile, compileField = compile) {
     const ast = this;
     let elements;
     let rest;
@@ -3510,23 +3511,32 @@ class Arrays extends Base2 {
       }
       return rest[0];
     }
-    return fnUntracedEager2(function* (input, options) {
-      if (input === missing) {
-        return missing;
+    const finish = (state) => {
+      const {
+        input,
+        len,
+        options
+      } = state;
+      if (ast.rest.length === 0 && len > elementLen) {
+        for (let i = elementLen;i < len; i++) {
+          const unexpected = new UnexpectedKey(ast, input[i], options);
+          const issue = new Pointer([i], unexpected);
+          if (options.errors === "all") {
+            if (state.issues)
+              state.issues.push(issue);
+            else
+              state.issues = [issue];
+          } else {
+            return fail5(new Composite(ast, [issue], input, options));
+          }
+        }
       }
-      if (!Array.isArray(input)) {
-        return yield* fail5(new InvalidType(ast, input, options));
+      if (state.issues) {
+        return fail5(new Composite(ast, state.issues, input, options));
       }
-      if (!elements) {
-        elements = ast.elements.map((ast) => ({
-          ast,
-          parser: compileConstructorDefault(ast)
-        }));
-        rest = ast.rest.map((ast) => ({
-          ast,
-          parser: compileConstructorDefault(ast)
-        }));
-      }
+      return succeed6(state.output);
+    };
+    const parse = (input, options) => {
       const len = input.length;
       const state = {
         ast,
@@ -3538,32 +3548,46 @@ class Arrays extends Base2 {
         issues: undefined,
         options
       };
-      const concurrency = resolveConcurrency(options?.concurrency);
-      const eff = parseArray(state, input, {
-        concurrency: concurrency?.concurrency,
-        end: ast.rest.length === 0 ? elementLen : Math.max(len, elementLen + tailLen)
+      const end = ast.rest.length === 0 ? elementLen : Math.max(len, elementLen + tailLen);
+      const concurrency = options.concurrency === undefined ? 1 : resolveConcurrency(options.concurrency);
+      const eff = concurrency === 1 ? parseArray(state, input, 0, end) : parseArrayConcurrent(state, input, {
+        concurrency,
+        end
       });
-      if (eff)
-        yield* eff;
-      if (ast.rest.length === 0 && len > elementLen) {
-        for (let i = elementLen;i <= len - 1; i++) {
-          const unexpected = new UnexpectedKey(ast, input[i], options);
-          const issue = new Pointer([i], unexpected);
-          if (options.errors === "all") {
-            if (state.issues)
-              state.issues.push(issue);
-            else
-              state.issues = [issue];
-          } else {
-            return yield* fail5(new Composite(ast, [issue], input, options));
-          }
+      if (!eff)
+        return finish(state);
+      if (effectIsExit(eff))
+        return flatMapEager2(eff, () => finish(state));
+      let first = true;
+      return suspend2(() => {
+        if (!first)
+          return parse(input, options);
+        first = false;
+        return flatMap2(eff, () => finish(state));
+      });
+    };
+    return (input, options) => {
+      if (input === missing)
+        return missingExit;
+      try {
+        if (!Array.isArray(input)) {
+          return fail5(new InvalidType(ast, input, options));
         }
+        if (!elements) {
+          elements = ast.elements.map((ast) => ({
+            ast,
+            parser: compileField(ast)
+          }));
+          rest = ast.rest.map((ast) => ({
+            ast,
+            parser: compileField(ast)
+          }));
+        }
+        return parse(input, options);
+      } catch (error) {
+        return die3(error);
       }
-      if (state.issues) {
-        return yield* fail5(new Composite(ast, state.issues, input, options));
-      }
-      return state.output;
-    });
+    };
   }
   _rebuild(recur, checks, encodingChecks) {
     const elements = mapOrSame(this.elements, recur);
@@ -3579,48 +3603,45 @@ class Arrays extends Base2 {
   getExpected() {
     return "array";
   }
+};
+function stepArray(s, item, exit, i) {
+  if (exit._tag === "Failure") {
+    return wrapPropertyKeyIssue(s, s.ast, i, exit);
+  }
+  const value = exit === sameExit ? item : exit[args];
+  if (value !== missing) {
+    s.output[i] = value;
+  } else {
+    const p = s.getParser(s.tailThreshold, i);
+    if (isOptional(p.ast))
+      return;
+    const issue = new Pointer([i], new MissingKey(p.ast.context?.annotations));
+    if (s.options.errors === "all") {
+      if (s.issues)
+        s.issues.push(issue);
+      else
+        s.issues = [issue];
+    } else {
+      return fail4(new Composite(s.ast, [issue], s.input, s.options));
+    }
+  }
 }
-var parseArray = /* @__PURE__ */ iterateEager()({
+var parseArrayOptions = {
   onItem(s, item, i) {
     const value = i < s.len ? item : missing;
     return s.getParser(s.tailThreshold, i).parser(value, s.options);
   },
-  step(s, item, exit, i) {
-    if (exit._tag === "Failure") {
-      return wrapPropertyKeyIssue(s, s.ast, i, exit);
-    }
-    const value = exit === sameExit ? item : exit[args];
-    if (value !== missing) {
-      s.output[i] = value;
-    } else {
-      const p = s.getParser(s.tailThreshold, i);
-      if (isOptional(p.ast))
-        return;
-      const issue = new Pointer([i], new MissingKey(p.ast.context?.annotations));
-      if (s.options.errors === "all") {
-        if (s.issues)
-          s.issues.push(issue);
-        else
-          s.issues = [issue];
-      } else {
-        return fail4(new Composite(s.ast, [issue], s.input, s.options));
-      }
-    }
-  }
-});
-var resolveConcurrency = (value) => {
-  value = value === "unbounded" ? Infinity : value ?? 1;
-  return value > 1 ? {
-    concurrency: value
-  } : undefined;
+  step: stepArray
 };
+var parseArray = /* @__PURE__ */ iterateEager()(parseArrayOptions);
+var parseArrayConcurrent = /* @__PURE__ */ iterateConcurrent()(parseArrayOptions);
 var wrapPropertyKeyIssue = (s, ast, key, exit) => {
   if (exit.cause.reasons.length === 0) {
     return exit;
   }
   const issue = getSchemaIssue(exit.cause);
   if (issue === undefined) {
-    return failCause2(map5(exit.cause, (issue) => new Composite(ast, [new Pointer([key], issue)], s.input, s.options)));
+    return failCause2(map3(exit.cause, (issue) => new Composite(ast, [new Pointer([key], issue)], s.input, s.options)));
   }
   const pointer = new Pointer([key], issue);
   if (s.options.errors === "all") {
@@ -3644,7 +3665,7 @@ function getIndexSignatureKeys(input, parameter, options = defaultParseOptions) 
       case "Number":
         return (stringKeys ??= Object.keys(input)).filter((k) => parameter.matchKey(k, options) !== undefined);
       case "Symbol":
-        return (symbolKeys ??= Object.getOwnPropertySymbols(input)).filter((k) => parameter.matchKey(k, options) !== undefined);
+        return (symbolKeys ??= Object.getOwnPropertySymbols(input)).filter((k) => Object.prototype.propertyIsEnumerable.call(input, k) && parameter.matchKey(k, options) !== undefined);
       case "Union":
         return [...new Set(parameter.types.flatMap(go))];
       default:
@@ -3653,15 +3674,14 @@ function getIndexSignatureKeys(input, parameter, options = defaultParseOptions) 
   }
   return go(parameterFromPropertyKey(toEncoded(parameter)));
 }
-
-class PropertySignature {
+var PropertySignature = class {
   name;
   type;
   constructor(name, type) {
     this.name = name;
     this.type = type;
   }
-}
+};
 function isIndexSignatureParameterSide(ast) {
   switch (ast._tag) {
     case "String":
@@ -3675,11 +3695,24 @@ function isIndexSignatureParameterSide(ast) {
       return false;
   }
 }
-function isIndexSignatureParameter(ast) {
-  return isIndexSignatureParameterSide(ast) && isIndexSignatureParameterSide(toEncoded(ast));
+function isIndexSignatureParameterEncodedSide(ast) {
+  const encoded = getLastEncoding(ast);
+  switch (encoded._tag) {
+    case "String":
+    case "Number":
+    case "Symbol":
+    case "TemplateLiteral":
+      return true;
+    case "Union":
+      return encoded.types.every(isIndexSignatureParameterEncodedSide);
+    default:
+      return false;
+  }
 }
-
-class IndexSignature {
+function isIndexSignatureParameter(ast) {
+  return isIndexSignatureParameterSide(ast) && isIndexSignatureParameterEncodedSide(ast);
+}
+var IndexSignature = class {
   parameter;
   type;
   constructor(parameter, type) {
@@ -3692,9 +3725,8 @@ class IndexSignature {
       throw new Error("Cannot use `Schema.optionalKey` with index signatures, use `Schema.optional` instead.");
     }
   }
-}
-
-class Objects extends Base2 {
+};
+var Objects = class extends ASTNodeImpl {
   _tag = "Objects";
   propertySignatures;
   indexSignatures;
@@ -3704,105 +3736,103 @@ class Objects extends Base2 {
     this.propertySignatures = propertySignatures;
     this.indexSignatures = indexSignatures;
     this.encodingChecks = encodingChecks;
-    const duplicates = propertySignatures.map((ps) => ps.name).filter((name, i, arr) => arr.indexOf(name) !== i);
-    if (duplicates.length > 0) {
-      throw new Error(`Duplicate identifiers: ${JSON.stringify(duplicates)}. ts(2300)`);
-    }
   }
-  getParser(compile, compileConstructorDefault = compile) {
+  getParser(compile, compileField = compile) {
     const ast = this;
-    const expectedKeys = [];
-    for (const ps of ast.propertySignatures) {
-      expectedKeys.push(ps.name);
-    }
-    const hasProperties = expectedKeys.length;
+    const hasProperties = ast.propertySignatures.length;
     const indexCount = ast.indexSignatures.length;
-    let expectedKeysSet = hasProperties && indexCount ? new Set(expectedKeys) : undefined;
     if (!hasProperties && !indexCount) {
       return fromRefinement(ast, isNotNullish);
     }
     let properties;
     let indexes;
-    const finishIndex = (s, key, k2, inputValue, exitValue) => {
-      if (exitValue._tag === "Failure") {
-        return wrapPropertyKeyIssue(s, ast, key, exitValue) ?? void_2;
-      }
-      const value = exitValue === sameExit ? inputValue : exitValue[args];
-      if (k2 !== missing && value !== missing) {
-        if (hasProperties && (expectedKeysSet.has(key) || expectedKeysSet.has(k2)))
-          return void_2;
-        assignProperty(s.out, k2, value);
-      }
-      return void_2;
-    };
-    const parseIndex = (s, key, index, exitKey) => {
-      if (!exitKey) {
-        const eff = index.parserKey(key, s.options);
-        if (!effectIsExit(eff)) {
-          return flatMap2(exit2(eff), (exit) => parseIndex(s, key, index, exit));
-        }
-        exitKey = eff;
-      }
-      if (exitKey._tag === "Failure") {
-        return wrapPropertyKeyIssue(s, ast, key, exitKey) ?? void_2;
-      }
-      const k2 = exitKey === sameExit ? key : exitKey[args];
-      const inputValue = s.input[key];
-      const result = index.parserValue(inputValue, s.options);
-      return effectIsExit(result) ? finishIndex(s, key, k2, inputValue, result) : flatMap2(exit2(result), (exit) => finishIndex(s, key, k2, inputValue, exit));
-    };
-    const parseStringIndex = (s, key, index) => {
-      const inputValue = s.input[key];
-      const result = index.parserValue(inputValue, s.options);
-      return effectIsExit(result) ? finishIndex(s, key, key, inputValue, result) : flatMap2(exit2(result), (exit) => finishIndex(s, key, key, inputValue, exit));
-    };
-    const parseIndexes = indexCount ? iterateEager()({
-      onItem: (s, [key, index]) => parseIndex(s, key, index),
-      step: (_s, _, exit) => exit._tag === "Failure" ? exit : undefined
-    }) : undefined;
     const compileMembers = () => {
       if (!properties) {
         properties = ast.propertySignatures.map((ps) => ({
-          parser: compileConstructorDefault(ps.type),
+          parser: compileField(ps.type),
           name: ps.name,
           type: ps.type
         }));
         indexes = indexCount ? ast.indexSignatures.map((is) => ({
           is,
           parserKey: compile(parameterFromPropertyKey(is.parameter)),
-          parserValue: compileConstructorDefault(is.type)
+          parserValue: compileField(is.type)
         })) : undefined;
       }
       return properties;
     };
-    const fallback = fnUntracedEager2(function* (input, options) {
-      if (input === missing) {
-        return missing;
-      }
-      if (!(typeof input === "object" && input !== null && !Array.isArray(input))) {
-        return yield* fail5(new InvalidType(ast, input, options));
-      }
-      compileMembers();
-      const record = input;
-      const out = {};
-      const state = {
-        ast,
-        input: record,
-        out,
-        issues: undefined,
-        options
+    const makeFallback = () => {
+      const expectedKeys = new Set(ast.propertySignatures.map((ps) => typeof ps.name === "number" ? globalThis.String(ps.name) : ps.name));
+      const finishIndex = (s, key, k2, inputValue, exitValue) => {
+        if (exitValue._tag === "Failure") {
+          return wrapPropertyKeyIssue(s, ast, key, exitValue) ?? void_2;
+        }
+        const value = exitValue === sameExit ? inputValue : exitValue[args];
+        if (k2 !== missing && value !== missing) {
+          if (hasProperties && (expectedKeys.has(key) || expectedKeys.has(typeof k2 === "number" ? globalThis.String(k2) : k2)))
+            return void_2;
+          assignProperty(s.out, k2, value);
+        }
+        return void_2;
       };
-      const errorsAllOption = options.errors === "all";
-      const onExcessPropertyError = options.onExcessProperty === "error";
-      const onExcessPropertyPreserve = options.onExcessProperty === "preserve";
-      let inputKeys;
-      if (!indexCount && (onExcessPropertyError || onExcessPropertyPreserve)) {
-        expectedKeysSet ??= new Set(expectedKeys);
-        inputKeys = Reflect.ownKeys(record);
-        for (let i = 0;i < inputKeys.length; i++) {
-          const key = inputKeys[i];
-          if (!expectedKeysSet.has(key)) {
-            if (onExcessPropertyError) {
+      const parseIndex = (s, key, index, exitKey) => {
+        if (!exitKey) {
+          const eff = index.parserKey(key, s.options);
+          if (!effectIsExit(eff)) {
+            return flatMap2(exit2(eff), (exit) => parseIndex(s, key, index, exit));
+          }
+          exitKey = eff;
+        }
+        if (exitKey._tag === "Failure") {
+          return wrapPropertyKeyIssue(s, ast, key, exitKey) ?? void_2;
+        }
+        const k2 = exitKey === sameExit ? key : exitKey[args];
+        const inputValue = s.input[key];
+        const result = index.parserValue(inputValue, s.options);
+        return effectIsExit(result) ? finishIndex(s, key, k2, inputValue, result) : flatMap2(exit2(result), (exit) => finishIndex(s, key, k2, inputValue, exit));
+      };
+      const parseStringIndex = (s, key, index) => {
+        const inputValue = s.input[key];
+        const result = index.parserValue(inputValue, s.options);
+        return effectIsExit(result) ? finishIndex(s, key, key, inputValue, result) : flatMap2(exit2(result), (exit) => finishIndex(s, key, key, inputValue, exit));
+      };
+      const parseIndexes = indexCount ? iterateConcurrent()({
+        onItem: (s, [key, index]) => index.is.parameter === string2 ? parseStringIndex(s, key, index) : parseIndex(s, key, index),
+        step: (_s, _item, exit) => exit._tag === "Failure" ? exit : undefined
+      }) : undefined;
+      return fnUntracedEager2(function* (input, options) {
+        if (input === missing) {
+          return missing;
+        }
+        if (!(typeof input === "object" && input !== null && !Array.isArray(input))) {
+          return yield* fail5(new InvalidType(ast, input, options));
+        }
+        compileMembers();
+        const record = input;
+        const out = {};
+        const state = {
+          ast,
+          input: record,
+          out,
+          issues: undefined,
+          options
+        };
+        const errorsAllOption = options.errors === "all";
+        const onExcessPropertyError = options.onExcessProperty === "error";
+        const concurrency = options.concurrency === undefined ? 1 : resolveConcurrency(options.concurrency);
+        const indexKeys = indexCount && onExcessPropertyError ? ast.indexSignatures.map((index) => getIndexSignatureKeys(record, index.parameter, options)) : undefined;
+        if (onExcessPropertyError) {
+          const coveredKeys = indexKeys ? new Set(expectedKeys) : expectedKeys;
+          if (indexKeys) {
+            for (const keys of indexKeys) {
+              for (const key of keys)
+                coveredKeys.add(key);
+            }
+          }
+          const inputKeys = Reflect.ownKeys(record);
+          for (let i = 0;i < inputKeys.length; i++) {
+            const key = inputKeys[i];
+            if (!coveredKeys.has(key) && Object.prototype.propertyIsEnumerable.call(record, key)) {
               const unexpected = new UnexpectedKey(ast, record[key], options);
               const issue = new Pointer([key], unexpected);
               if (errorsAllOption) {
@@ -3815,61 +3845,53 @@ class Objects extends Base2 {
               } else {
                 return yield* fail5(new Composite(ast, [issue], input, options));
               }
-            } else {
-              assignProperty(out, key, record[key]);
             }
           }
         }
-      }
-      const concurrency = resolveConcurrency(options?.concurrency);
-      if (hasProperties) {
-        const eff = parseProperties(state, properties, concurrency);
-        if (eff)
-          yield* eff;
-      }
-      if (indexCount && !concurrency) {
-        for (let i = 0;i < indexCount; i++) {
-          const index = indexes[i];
-          const parse = index.is.parameter === string2 ? parseStringIndex : parseIndex;
-          const keys = index.is.parameter === string2 ? Object.keys(record) : getIndexSignatureKeys(record, index.is.parameter, options);
-          for (let j = 0;j < keys.length; j++) {
-            const eff = parse(state, keys[j], index);
-            if (!effectIsExit(eff))
-              yield* eff;
-            else if (eff._tag === "Failure")
-              return yield* eff;
-          }
+        if (hasProperties) {
+          const eff = concurrency === 1 ? parseProperties(state, properties) : parsePropertiesConcurrent(state, properties, {
+            concurrency
+          });
+          if (eff)
+            yield* eff;
         }
-      } else if (parseIndexes) {
-        const keyPairs = empty2();
-        for (let i = 0;i < indexCount; i++) {
-          const index = indexes[i];
-          const keys = getIndexSignatureKeys(record, index.is.parameter, options);
-          for (let j = 0;j < keys.length; j++) {
-            keyPairs.push([keys[j], index]);
+        if (indexCount && concurrency === 1) {
+          for (let i = 0;i < indexCount; i++) {
+            const index = indexes[i];
+            const parse = index.is.parameter === string2 ? parseStringIndex : parseIndex;
+            const keys = indexKeys?.[i] ?? (index.is.parameter === string2 ? Object.keys(record) : getIndexSignatureKeys(record, index.is.parameter, options));
+            for (let j = 0;j < keys.length; j++) {
+              const eff = parse(state, keys[j], index);
+              if (!effectIsExit(eff))
+                yield* eff;
+              else if (eff._tag === "Failure")
+                return yield* eff;
+            }
           }
-        }
-        const eff = parseIndexes(state, keyPairs, concurrency);
-        if (eff)
-          yield* eff;
-      }
-      if (state.issues) {
-        return yield* fail5(new Composite(ast, state.issues, input, options));
-      }
-      if (options.propertyOrder === "original") {
-        const keys = (inputKeys ?? Reflect.ownKeys(record)).concat(expectedKeys);
-        const preserved = {};
-        for (const key of keys) {
-          if (Object.hasOwn(out, key)) {
-            assignProperty(preserved, key, out[key]);
+        } else if (parseIndexes) {
+          const keyPairs = empty2();
+          for (let i = 0;i < indexCount; i++) {
+            const index = indexes[i];
+            const keys = indexKeys?.[i] ?? (index.is.parameter === string2 ? Object.keys(record) : getIndexSignatureKeys(record, index.is.parameter, options));
+            for (let j = 0;j < keys.length; j++) {
+              keyPairs.push([keys[j], index]);
+            }
           }
+          const eff = parseIndexes(state, keyPairs, {
+            concurrency
+          });
+          if (eff)
+            yield* eff;
         }
-        return preserved;
-      }
-      return out;
-    });
+        if (state.issues) {
+          return yield* fail5(new Composite(ast, state.issues, input, options));
+        }
+        return out;
+      });
+    };
     if (indexCount)
-      return fallback;
+      return makeFallback();
+    let fallback;
     const resume = (state, index, pending) => {
       const property = properties[index];
       return flatMap2(exit2(pending), (exit) => {
@@ -3884,8 +3906,8 @@ class Objects extends Base2 {
     return (input, options) => {
       if (input === missing)
         return missingExit;
-      if (options.errors === "all" || options.onExcessProperty !== undefined || options.propertyOrder === "original" || options.concurrency !== undefined) {
-        return fallback(input, options);
+      if (options.errors === "all" || options.onExcessProperty !== undefined || options.concurrency !== undefined && resolveConcurrency(options.concurrency) !== 1) {
+        return (fallback ??= makeFallback())(input, options);
       }
       if (!(typeof input === "object" && input !== null && !Array.isArray(input))) {
         return fail5(new InvalidType(ast, input, options));
@@ -3904,7 +3926,7 @@ class Objects extends Base2 {
         for (let index = 0;index < props.length; index++) {
           const property = props[index];
           const name = property.name;
-          const hasKey = Object.hasOwn(record, name);
+          const hasKey = hasPropertySignature(record, name);
           const value = hasKey ? record[name] : missing;
           const exit = property.parser(value, options);
           if (!effectIsExit(exit)) {
@@ -3920,7 +3942,7 @@ class Objects extends Base2 {
             return terminal;
         }
       } catch (error) {
-        return die2(error);
+        return die3(error);
       }
       return succeed6(out);
     };
@@ -3948,7 +3970,7 @@ class Objects extends Base2 {
       return "object | array";
     return "object";
   }
-}
+};
 function stepProperty(s, p, exit) {
   if (exit._tag === "Failure") {
     return wrapPropertyKeyIssue(s, s.ast, p.name, exit);
@@ -3974,9 +3996,9 @@ function stepProperty(s, p, exit) {
     }
   }
 }
-var parseProperties = /* @__PURE__ */ iterateEager()({
+var parsePropertiesOptions = {
   onItem(s, p) {
-    if (!Object.hasOwn(s.input, p.name)) {
+    if (!hasPropertySignature(s.input, p.name)) {
       return p.parser(missing, s.options);
     }
     const value = s.input[p.name];
@@ -3984,7 +4006,9 @@ var parseProperties = /* @__PURE__ */ iterateEager()({
     return p.parser(value, s.options);
   },
   step: stepProperty
-});
+};
+var parseProperties = /* @__PURE__ */ iterateEager()(parsePropertiesOptions);
+var parsePropertiesConcurrent = /* @__PURE__ */ iterateConcurrent()(parsePropertiesOptions);
 function combineChecks(a, b) {
   if (!a)
     return b;
@@ -4003,8 +4027,8 @@ function getAST(self2) {
 function tuple(elements, checks = undefined) {
   return new Arrays(false, elements.map((e) => e.ast), [], undefined, checks);
 }
-function union2(members, mode, checks) {
-  return new Union(members.map(getAST), mode, undefined, checks);
+function union(members, options, checks) {
+  return new Union(members.map(getAST), options, undefined, checks);
 }
 function structWithRest(ast, records) {
   if (ast.encoding || records.some((r) => r.encoding)) {
@@ -4014,6 +4038,11 @@ function structWithRest(ast, records) {
   let indexSignatures = ast.indexSignatures;
   let checks = ast.checks;
   for (const record of records) {
+    for (const propertySignature of record.propertySignatures) {
+      if (propertySignatures.some((ps) => ps.name === propertySignature.name)) {
+        throw new Error(`Duplicate identifier: ${JSON.stringify(propertySignature.name)}. ts(2300)`);
+      }
+    }
     propertySignatures = propertySignatures.concat(record.propertySignatures);
     indexSignatures = indexSignatures.concat(record.indexSignatures);
     checks = combineChecks(checks, record.checks);
@@ -4124,7 +4153,9 @@ function collectSentinels(ast) {
 }
 var candidateIndexCache = /* @__PURE__ */ new WeakMap;
 var emptyCandidates = /* @__PURE__ */ Object.freeze([]);
-function getIndex(types) {
+var getRuntimeType = (input) => input === null ? "null" : Array.isArray(input) ? "array" : typeof input;
+var hasPropertySignature = (input, key) => key === "__proto__" ? Object.hasOwn(input, key) : (key in input);
+function getCandidateIndex(types) {
   let index = candidateIndexCache.get(types);
   if (index)
     return index;
@@ -4133,22 +4164,22 @@ function getIndex(types) {
   let otherwise;
   let literalCandidates;
   let onlyLiterals = true;
+  const literalOf = [];
   for (let i = 0;i < types.length; i++) {
     const a = types[i];
     const encoded = toCandidate(a);
     if (isNever2(encoded))
       continue;
-    if (onlyLiterals) {
-      if (isLiteral(encoded) || isUniqueSymbol(encoded)) {
-        literalCandidates ??= new Map;
-        const literal = isLiteral(encoded) ? encoded.literal : encoded.symbol;
-        let arr = literalCandidates.get(literal);
-        if (!arr)
-          literalCandidates.set(literal, arr = []);
-        arr.push(a);
-      } else {
-        onlyLiterals = false;
-      }
+    if (isLiteral(encoded) || isUniqueSymbol(encoded)) {
+      literalCandidates ??= new Map;
+      const literal = isLiteral(encoded) ? encoded.literal : encoded.symbol;
+      literalOf[i] = literal;
+      let arr = literalCandidates.get(literal);
+      if (!arr)
+        literalCandidates.set(literal, arr = []);
+      arr.push(i);
+    } else {
+      onlyLiterals = false;
     }
     const sentinels = collectSentinels(encoded);
     if (sentinels.length) {
@@ -4174,22 +4205,25 @@ function getIndex(types) {
         (otherwise[t] ??= []).push(i);
     }
   }
+  const fallbacks = {};
+  const getFallback = (type) => fallbacks[type] ??= Object.freeze(otherwise?.[type] ?? emptyCandidates);
   if (onlyLiterals && literalCandidates) {
     literalCandidates.forEach(Object.freeze);
     index = (input) => literalCandidates.get(input) ?? emptyCandidates;
   } else if (bySentinel?.size === 1 && !otherwise) {
     const [key, [byValue]] = bySentinel.entries().next().value;
-    const candidates = byValue;
+    const candidates = new Map;
     for (const [literal, indexes] of byValue) {
-      candidates.set(literal, Object.freeze(Array.from(indexes, (index) => types[index])));
+      candidates.set(literal, Object.freeze(Array.from(indexes)));
     }
+    const all = Object.freeze(types.map((_, i) => i));
     index = (input, isConstructor) => {
       if (isObjectKeyword(input)) {
-        const value = Object.hasOwn(input, key) ? input[key] : undefined;
+        const value = hasPropertySignature(input, key) ? input[key] : undefined;
         if (value !== undefined)
           return candidates.get(value) ?? emptyCandidates;
         if (isConstructor)
-          return types;
+          return all;
       }
       return emptyCandidates;
     };
@@ -4201,20 +4235,19 @@ function getIndex(types) {
       }
     }
     index = (input, isConstructor) => {
-      const runtimeType = input === null ? "null" : Array.isArray(input) ? "array" : typeof input;
-      const base = otherwise?.[runtimeType] ?? emptyCandidates;
+      const runtimeType = getRuntimeType(input);
       if (!isObjectKeyword(input))
-        return base.map((i) => types[i]);
-      const selected = new Set(base);
+        return getFallback(runtimeType);
+      const selected = new Set(otherwise?.[runtimeType]);
       let directKey;
       if (commonSentinel) {
         const [key, [byValue]] = commonSentinel;
-        const hasKey = Object.hasOwn(input, key);
+        const hasKey = hasPropertySignature(input, key);
         const value = hasKey ? input[key] : undefined;
         if (hasKey && (!isConstructor || value !== undefined)) {
           const match = byValue.get(value);
           if (!match)
-            return base.map((i) => types[i]);
+            return getFallback(runtimeType);
           for (const i of match)
             selected.add(i);
           directKey = key;
@@ -4222,7 +4255,7 @@ function getIndex(types) {
       }
       if (directKey === undefined) {
         for (const [key, [byValue, all]] of bySentinel) {
-          const hasKey = Object.hasOwn(input, key);
+          const hasKey = hasPropertySignature(input, key);
           const value = hasKey ? input[key] : undefined;
           if (hasKey && (!isConstructor || value !== undefined)) {
             const match = byValue.get(value);
@@ -4239,7 +4272,7 @@ function getIndex(types) {
       for (const [key, [byValue, all]] of bySentinel) {
         if (key === directKey)
           continue;
-        const hasKey = Object.hasOwn(input, key);
+        const hasKey = hasPropertySignature(input, key);
         const value = hasKey ? input[key] : undefined;
         if (hasKey && (!isConstructor || value !== undefined)) {
           const match = byValue.get(value);
@@ -4249,82 +4282,54 @@ function getIndex(types) {
           }
         }
       }
-      return Array.from(selected).sort((a, b) => a - b).map((i) => types[i]);
+      return Array.from(selected).sort((a, b) => a - b);
     };
   } else {
     index = (input) => {
-      const runtimeType = input === null ? "null" : Array.isArray(input) ? "array" : typeof input;
-      return (otherwise?.[runtimeType] ?? emptyCandidates).map((i) => types[i]).filter(filterLiterals(input));
+      const fallback = getFallback(getRuntimeType(input));
+      return literalCandidates ? fallback.filter((i) => literalOf[i] === undefined || literalOf[i] === input) : fallback;
     };
   }
   candidateIndexCache.set(types, index);
   return index;
 }
-function filterLiterals(input) {
-  return (ast) => {
-    const encoded = toCandidate(ast);
-    return encoded._tag === "Literal" ? encoded.literal === input : encoded._tag === "UniqueSymbol" ? encoded.symbol === input : true;
-  };
-}
-function getCandidates(input, types, isConstructor = false) {
-  return getIndex(types)(input, isConstructor);
-}
-
-class Union extends Base2 {
+var Union = class extends ASTNodeImpl {
   _tag = "Union";
   types;
-  mode;
+  options;
   encodingChecks;
-  constructor(types, mode, annotations, checks, encoding, context, encodingChecks) {
+  constructor(types, options, annotations, checks, encoding, context, encodingChecks) {
     super(annotations, checks, encoding, context);
     this.types = types;
-    this.mode = mode;
+    this.options = options;
     this.encodingChecks = encodingChecks;
   }
-  getParser(compile, compileConstructorDefault) {
+  getParser(compile, compileField) {
     const ast = this;
+    const isConstructor = compileField !== undefined;
+    const parsers = [];
+    const parser = (i) => parsers[i] ??= compile(ast.types[i]);
+    let index;
     return (input, options) => {
       if (input === missing) {
         return missingExit;
       }
-      const candidates = getCandidates(input, ast.types, compileConstructorDefault !== undefined);
+      const candidates = (index ??= getCandidateIndex(ast.types))(input, isConstructor);
+      if (candidates.length === 0) {
+        return fail5(new AnyOf(ast, [], input, options));
+      }
       if (candidates.length === 1) {
-        const result = compile(candidates[0])(input, options);
+        const result = parser(candidates[0])(input, options);
         if (result._tag === "Success")
           return result;
-        return effectIsExit(result) ? failSingleUnionCandidate(ast, result.cause, input, options) : catchCause2(result, (cause) => failSingleUnionCandidate(ast, cause, input, options));
+        return effectIsExit(result) ? failSingleUnionCandidate(ast, result.cause, input, options) : catchSingleUnionCandidate(ast, result, input, options);
       }
-      const state = {
-        ast,
-        compile,
-        input,
-        out: undefined,
-        successes: ast.mode === "oneOf" ? [] : undefined,
-        issues: undefined,
-        options
-      };
-      const concurrency = resolveConcurrency(options?.concurrency);
-      const eff = parseUnion(state, candidates, concurrency ? {
-        ...concurrency,
-        orderedStep: true
-      } : undefined);
-      if (!eff) {
-        if (state.out)
-          return state.out;
-        return fail5(new AnyOf(ast, state.issues ?? [], input, options));
-      }
-      return flatMapEager2(eff, (_) => {
-        if (state.out === sameExit)
-          return succeed5(input);
-        if (state.out)
-          return state.out;
-        return fail5(new AnyOf(ast, state.issues ?? [], input, options));
-      });
+      return parseUnionCandidates(ast, parser, candidates, input, options);
     };
   }
   _rebuild(recur, checks, encodingChecks) {
     const types = mapOrSame(this.types, recur);
-    return types === this.types && checks === this.checks && encodingChecks === this.encodingChecks ? this : new Union(types, this.mode, this.annotations, checks, undefined, this.context, encodingChecks);
+    return types === this.types && checks === this.checks && encodingChecks === this.encodingChecks ? this : new Union(types, this.options, this.annotations, checks, undefined, this.context, encodingChecks);
   }
   recur(recur) {
     return this._rebuild(recur, this.checks, this.encodingChecks);
@@ -4368,19 +4373,48 @@ class Union extends Base2 {
     });
     return Array.from(new Set(types)).join(" | ");
   }
-}
+};
 function failSingleUnionCandidate(ast, cause, input, options) {
   const issue = getSchemaIssue(cause);
   if (!issue)
     return failCause2(cause);
   return fail4(new AnyOf(ast, [issue], input, options));
 }
+function catchSingleUnionCandidate(ast, result, input, options) {
+  return catchCause2(result, (cause) => failSingleUnionCandidate(ast, cause, input, options));
+}
+function parseUnionCandidates(ast, parser, candidates, input, options) {
+  const state = {
+    ast,
+    parser,
+    input,
+    out: undefined,
+    successes: ast.options?.mode === "oneOf" ? [] : undefined,
+    issues: undefined,
+    options
+  };
+  const eff = parseUnion(state, candidates);
+  if (!eff) {
+    if (state.out)
+      return state.out;
+    return fail5(new AnyOf(ast, state.issues ?? [], input, options));
+  }
+  return resumeUnion(eff, state);
+}
+function resumeUnion(eff, state) {
+  return flatMapEager2(eff, (_) => {
+    if (state.out === sameExit)
+      return succeed5(state.input);
+    if (state.out)
+      return state.out;
+    return fail5(new AnyOf(state.ast, state.issues ?? [], state.input, state.options));
+  });
+}
 var parseUnion = /* @__PURE__ */ iterateEager()({
-  onItem(s, ast) {
-    const parser = s.compile(ast);
-    return parser(s.input, s.options);
+  onItem(s, i) {
+    return s.parser(i)(s.input, s.options);
   },
-  step(s, candidate, exit) {
+  step(s, i, exit) {
     if (exit._tag === "Failure") {
       const issue = getSchemaIssue(exit.cause);
       if (issue === undefined) {
@@ -4392,39 +4426,26 @@ var parseUnion = /* @__PURE__ */ iterateEager()({
         s.issues = [issue];
     } else {
       if (s.out && s.successes) {
-        s.successes.push(candidate);
+        s.successes.push(s.ast.types[i]);
         return fail4(new OneOf(s.ast, s.successes, s.input, s.options));
       }
       s.out = exit;
       if (s.successes) {
-        s.successes.push(candidate);
+        s.successes.push(s.ast.types[i]);
       } else {
         return void_2;
       }
     }
   }
 });
-var nonFiniteLiterals = /* @__PURE__ */ new Union([/* @__PURE__ */ new Literal("Infinity"), /* @__PURE__ */ new Literal("-Infinity"), /* @__PURE__ */ new Literal("NaN")], "anyOf");
+var nonFiniteLiterals = /* @__PURE__ */ new Union([/* @__PURE__ */ new Literal("Infinity"), /* @__PURE__ */ new Literal("-Infinity"), /* @__PURE__ */ new Literal("NaN")]);
 function formatIsMutable(isMutable) {
   return isMutable ? "" : "readonly ";
 }
 function formatIsOptional(isOptional) {
   return isOptional ? "?" : "";
 }
-function memoizeThunk(f) {
-  let done = false;
-  let a;
-  return () => {
-    if (done) {
-      return a;
-    }
-    a = f();
-    done = true;
-    return a;
-  };
-}
-
-class Suspend extends Base2 {
+var Suspend = class extends ASTNodeImpl {
   _tag = "Suspend";
   thunk;
   constructor(thunk, annotations, checks, encoding, context) {
@@ -4432,7 +4453,8 @@ class Suspend extends Base2 {
       throw new Error("Cannot add checks to Suspend");
     }
     super(annotations, undefined, encoding, context);
-    this.thunk = memoizeThunk(thunk);
+    let ast;
+    this.thunk = () => ast ??= thunk();
   }
   getParser(compile) {
     let parser;
@@ -4444,9 +4466,8 @@ class Suspend extends Base2 {
   getExpected(getExpected) {
     return getExpected(this.thunk());
   }
-}
-
-class Filter2 extends Class {
+};
+var Filter2 = class extends Class {
   _tag = "Filter";
   run;
   annotations;
@@ -4469,9 +4490,8 @@ class Filter2 extends Class {
   and(other, annotations) {
     return new FilterGroup([this, other], annotations);
   }
-}
-
-class FilterGroup extends Class {
+};
+var FilterGroup = class extends Class {
   _tag = "FilterGroup";
   checks;
   annotations;
@@ -4489,7 +4509,7 @@ class FilterGroup extends Class {
   and(other, annotations) {
     return new FilterGroup([this, other], annotations);
   }
-}
+};
 function makeFilter(filter, annotations, aborted = false) {
   return new Filter2((input, ast, options) => normalizeFilterOutput(ast, filter(input, ast, options), input, options), annotations, aborted);
 }
@@ -4506,58 +4526,59 @@ function isFinite(annotations) {
     toCode: () => ({
       runtime: "Schema.isFinite()"
     }),
-    arbitrary: {
-      constraint: {
-        noInfinity: true,
-        noNaN: true
-      }
+    arbitraryConstraint: {
+      number: "finite"
     },
     ...annotations
   });
 }
 var finite = /* @__PURE__ */ appendChecks(number2, [/* @__PURE__ */ isFinite()]);
-var numberToJson = /* @__PURE__ */ new Link(/* @__PURE__ */ new Union([finite, nonFiniteLiterals], "anyOf"), /* @__PURE__ */ new Transformation(/* @__PURE__ */ Number3(), /* @__PURE__ */ transform((n) => globalThis.Number.isFinite(n) ? n : globalThis.String(n))));
+var numberToJson = /* @__PURE__ */ new Link(/* @__PURE__ */ new Union([finite, nonFiniteLiterals]), /* @__PURE__ */ new Transformation(/* @__PURE__ */ Number3(), /* @__PURE__ */ transform((n) => globalThis.Number.isFinite(n) ? n : globalThis.String(n))));
 function isPattern(regExp, annotations) {
-  const source = regExp.source;
-  const pattern = new globalThis.RegExp(source, regExp.flags);
+  const copy = new globalThis.RegExp(regExp);
+  const payload = {
+    source: copy.source,
+    flags: copy.flags
+  };
   return makeFilter((s) => {
-    pattern.lastIndex = 0;
-    return pattern.test(s);
+    copy.lastIndex = 0;
+    return copy.test(s);
   }, {
-    expected: `a string matching the RegExp ${source}`,
+    expected: `a string matching the RegExp ${payload.source}`,
     representation: {
       id: "effect/schema/isPattern",
-      payload: {
-        source,
-        flags: regExp.flags
-      }
+      payload
     },
-    toJsonSchema: () => ({
-      pattern: source
-    }),
-    arbitrary: {
-      constraint: {
-        patterns: [regExp.source]
-      }
+    toJsonSchema: () => [{}, true],
+    arbitraryConstraint: {
+      patterns: [payload]
     },
     ...annotations
   });
 }
-function modifyOwnPropertyDescriptors(ast, f) {
-  const d = Object.getOwnPropertyDescriptors(ast);
-  f(d);
-  return Object.create(Object.getPrototypeOf(ast), d);
+var bodyOwners = /* @__PURE__ */ new WeakMap;
+function copy(ast, changes) {
+  const out = Object.assign(Object.create(Object.getPrototypeOf(ast)), ast, changes);
+  if (Reflect.ownKeys(changes).every((key) => key === "context" || key === "encoding")) {
+    bodyOwners.set(out, getContextOwner(ast));
+  }
+  return out;
 }
-var contextOwners = /* @__PURE__ */ new WeakMap;
 function getContextOwner(ast) {
-  return contextOwners.get(ast) ?? ast;
+  const existing = bodyOwners.get(ast);
+  if (existing !== undefined)
+    return existing;
+  if (ast.encoding === undefined)
+    return ast;
+  const owner = Object.assign(Object.create(Object.getPrototypeOf(ast)), ast, {
+    encoding: undefined
+  });
+  bodyOwners.set(ast, owner);
+  return owner;
 }
 function replaceEncoding(ast, encoding) {
-  if (ast.encoding === encoding) {
-    return ast;
-  }
-  return modifyOwnPropertyDescriptors(ast, (d) => {
-    d.encoding.value = encoding;
+  return ast.encoding === encoding ? ast : copy(ast, {
+    encoding
   });
 }
 function replaceContext(ast, context) {
@@ -4565,25 +4586,26 @@ function replaceContext(ast, context) {
     return ast;
   }
   const owner = getContextOwner(ast);
-  if (owner.context === context) {
+  if (owner.context === context && owner.encoding === ast.encoding) {
     return owner;
   }
-  const out = modifyOwnPropertyDescriptors(ast, (d) => {
-    d.context.value = context;
+  return copy(ast, {
+    context
   });
-  contextOwners.set(out, owner);
-  return out;
+}
+function getLastEncoding(ast) {
+  return ast.encoding ? getLastEncoding(ast.encoding[ast.encoding.length - 1].to) : ast;
 }
 function annotate(ast, annotations) {
   if (ast.checks) {
     const last = ast.checks[ast.checks.length - 1];
     return replaceChecks(ast, append(ast.checks.slice(0, -1), last.annotate(annotations)));
   }
-  return modifyOwnPropertyDescriptors(ast, (d) => {
-    d.annotations.value = {
-      ...d.annotations.value,
+  return copy(ast, {
+    annotations: {
+      ...ast.annotations,
       ...annotations
-    };
+    }
   });
 }
 function replaceChecks(ast, checks) {
@@ -4593,8 +4615,8 @@ function replaceChecks(ast, checks) {
   if (ast.checks === checks) {
     return ast;
   }
-  return modifyOwnPropertyDescriptors(ast, (d) => {
-    d.checks.value = checks;
+  return copy(ast, {
+    checks
   });
 }
 function appendChecks(ast, checks) {
@@ -4627,25 +4649,22 @@ function appendTransformation(from, transformation, to) {
   const link = new Link(from, transformation);
   return replaceEncoding(to, to.encoding ? [...to.encoding, link] : [link]);
 }
-function brand(ast, brand) {
-  const existing = resolveBrands(ast);
-  const brands = existing ? [...existing, brand] : [brand];
-  return annotate(ast, {
-    brands
-  });
-}
 function mapOrSame(as, f) {
-  let changed = false;
-  const out = new Array(as.length);
+  let out;
   for (let i = 0;i < as.length; i++) {
     const a = as[i];
     const fa = f(a);
-    if (fa !== a) {
-      changed = true;
+    if (out) {
+      out[i] = fa;
+    } else if (fa !== a) {
+      out = new Array(as.length);
+      for (let j = 0;j < i; j++) {
+        out[j] = as[j];
+      }
+      out[i] = fa;
     }
-    out[i] = fa;
   }
-  return changed ? out : as;
+  return out ?? as;
 }
 function annotateKey(ast, annotations) {
   const context = ast.context ? new Context(ast.context.isOptional, ast.context.isMutable, ast.context.constructorDefault, {
@@ -4659,11 +4678,9 @@ var optionalKey = /* @__PURE__ */ memoizeIdempotent((ast) => {
   return optionalKeyLastLink(replaceContext(ast, context));
 });
 var optionalKeyLastLink = /* @__PURE__ */ applyToLastLink(optionalKey);
-var optional = /* @__PURE__ */ memoize((ast) => optionalKey(new Union([ast, undefined_2], "anyOf")));
+var optional = /* @__PURE__ */ memoize((ast) => optionalKey(new Union([ast, undefined_2])));
 function withConstructorDefault(ast, defaultValue) {
-  const transformation = new Transformation(withDefault(defaultValue), passthrough());
-  const constructorDefault = new Link(unknown, transformation);
-  const context = ast.context ? new Context(ast.context.isOptional, ast.context.isMutable, constructorDefault, ast.context.annotations) : new Context(false, false, constructorDefault);
+  const context = ast.context ? new Context(ast.context.isOptional, ast.context.isMutable, defaultValue, ast.context.annotations) : new Context(false, false, defaultValue);
   return replaceContext(ast, context);
 }
 function decodeTo(from, to, transformation) {
@@ -4675,12 +4692,14 @@ function parseParameter(ast) {
   function go(ast) {
     switch (ast._tag) {
       case "Literal":
-        if (isPropertyKey(ast.literal)) {
+        if (isPropertyKey(ast.literal) && !literals.includes(ast.literal)) {
           literals.push(ast.literal);
         }
         return;
       case "UniqueSymbol":
-        literals.push(ast.symbol);
+        if (!literals.includes(ast.symbol)) {
+          literals.push(ast.symbol);
+        }
         return;
       case "Never":
         return;
@@ -4721,18 +4740,30 @@ function extractStructuralChecks(checks) {
   const out = checks.flatMap(extract);
   return isArrayNonEmpty2(out) ? out : undefined;
 }
-var toType = /* @__PURE__ */ memoizeIdempotent((ast) => {
-  if (ast.encoding) {
-    return toType(replaceEncoding(ast, undefined));
+function canPreserveEncodingChecks(ast) {
+  let preserve = true;
+  function visit(child) {
+    preserve = preserve && !child.encoding && !isSuspend(child);
+    if (preserve && "recur" in child)
+      child.recur(visit);
+    return child;
   }
-  const out = ast;
-  const type = out.recur?.(toType) ?? out;
-  const encodingChecks = type.encodingChecks;
-  if (encodingChecks) {
-    const checks = type === ast ? encodingChecks : isArrays(type) || isObjects(type) || isDeclaration(type) && type.typeParameters.length > 0 ? extractStructuralChecks(encodingChecks) : undefined;
-    return modifyOwnPropertyDescriptors(type, (d) => {
-      d.encodingChecks.value = undefined;
-      d.checks.value = combineChecks(type.checks, checks);
+  if ("recur" in ast)
+    ast.recur(visit);
+  return preserve;
+}
+var toType = /* @__PURE__ */ memoizeIdempotent((ast) => {
+  const owner = getContextOwner(ast);
+  if (owner !== ast) {
+    const type = toType(owner);
+    return type === owner && ast.encoding === undefined ? ast : replaceContext(type, ast.context);
+  }
+  const type = "recur" in ast ? ast.recur(toType) : ast;
+  if ("encodingChecks" in type && type.encodingChecks) {
+    const checks = canPreserveEncodingChecks(ast) ? type.encodingChecks : isArrays(type) || isObjects(type) || isDeclaration(type) && type.typeParameters.length > 0 ? extractStructuralChecks(type.encodingChecks) : undefined;
+    return copy(type, {
+      encodingChecks: undefined,
+      checks: combineChecks(type.checks, checks)
     });
   }
   return type;
@@ -4759,8 +4790,12 @@ var flip2 = /* @__PURE__ */ memoize((ast) => {
   if (ast.encoding) {
     return flipEncoding(ast, ast.encoding);
   }
-  const out = ast;
-  return out.flip?.(flip2) ?? out.recur?.(flip2) ?? out;
+  const owner = getContextOwner(ast);
+  if (owner !== ast) {
+    const flipped = flip2(owner);
+    return flipped === owner ? ast : replaceContext(flipped, ast.context);
+  }
+  return "flip" in ast ? ast.flip(flip2) : ("recur" in ast) ? ast.recur(flip2) : ast;
 });
 function containsUndefined(ast) {
   switch (ast._tag) {
@@ -4773,7 +4808,7 @@ function containsUndefined(ast) {
   }
 }
 function fromConst(ast, value) {
-  const succeed = succeed6(value);
+  const succeed = value === 0 ? sameExit : succeed6(value);
   return (input, options) => {
     if (input === missing)
       return missingExit;
@@ -4818,10 +4853,10 @@ function isStringFinite(annotations) {
 }
 var finiteString = /* @__PURE__ */ appendChecks(string2, [/* @__PURE__ */ isStringFinite()]);
 var finiteToString = /* @__PURE__ */ new Link(finiteString, numberFromString);
-var numberToString = /* @__PURE__ */ new Link(/* @__PURE__ */ new Union([finiteString, nonFiniteLiterals], "anyOf"), numberFromString);
+var numberToString = /* @__PURE__ */ new Link(/* @__PURE__ */ new Union([finiteString, nonFiniteLiterals]), numberFromString);
 var BIGINT_PATTERN = "-?\\d+";
 var isStringBigIntRegExp = /* @__PURE__ */ new globalThis.RegExp(`^${BIGINT_PATTERN}$`);
-var REGEXP_PATTERN = "Symbol\\((.*)\\)";
+var REGEXP_PATTERN = "Symbol\\(([\\s\\S]*)\\)";
 var isStringSymbolRegExp = /* @__PURE__ */ new globalThis.RegExp(`^${REGEXP_PATTERN}$`);
 function collectIssues(checks, value, issues, ast, options) {
   for (let i = 0;i < checks.length; i++) {
@@ -4920,8 +4955,7 @@ var Json = /* @__PURE__ */ new Declaration([], () => (input, ast, options) => is
   toCodecJson: () => {
     return;
   },
-  toCodecStringTree: () => unknownToStringTree,
-  toArbitrary: () => (fc) => fc.jsonValue()
+  toCodecStringTree: () => unknownToStringTree
 });
 function isStringTree(u) {
   return isTree(u, isStringTreeLeaf);
@@ -4934,104 +4968,37 @@ var StringTree = /* @__PURE__ */ new Declaration([], () => (input, ast, options)
 });
 var unknownToStringTree = /* @__PURE__ */ new Link(StringTree, /* @__PURE__ */ passthrough2());
 
-// node_modules/effect/dist/SchemaParser.js
-function makeEffect(schema) {
-  const parser = runWithCompiler(constructorCompiler, toType(schema.ast));
-  return (input, options) => {
-    return parser(input, options?.disableChecks ? options?.parseOptions ? {
-      ...options.parseOptions,
-      disableChecks: true
-    } : {
-      disableChecks: true
-    } : options?.parseOptions);
-  };
-}
-function makeOption(schema) {
-  const parser = makeEffect(schema);
-  return (input, options) => {
-    const exit = runSyncExit2(parser(input, options));
-    if (isSuccess3(exit)) {
-      return some2(exit.value);
-    }
-    getSchemaIssueOrThrow(exit.cause, "Option adapter can only return none for schema issues");
-    return none2();
-  };
-}
-function make7(schema) {
-  const parser = makeEffect(schema);
-  return (input, options) => {
-    const exit = runSyncExit2(parser(input, options));
-    if (isSuccess3(exit)) {
-      return exit.value;
-    }
-    const issue = getSchemaIssueOrThrow(exit.cause, "Constructor adapter can only throw schema issues");
-    throw new Error("Schema validation failed", {
-      cause: issue
-    });
-  };
-}
-function is(schema) {
-  return _is(schema.ast);
-}
-function _is(ast) {
-  const parser = asExit(run(toType(ast)));
-  return (input) => {
-    const exit = parser(input, defaultParseOptions);
-    if (isSuccess3(exit)) {
-      return true;
-    }
-    getSchemaIssueOrThrow(exit.cause, "Type guard adapter can only return false for schema issues");
-    return false;
-  };
-}
-var mergeParseOptions = (options, overrideOptions) => overrideOptions ? {
-  ...options,
-  ...overrideOptions
-} : options;
-var getValue = (value) => {
-  if (value === missing) {
-    return fail5(new InvalidValue);
+// node_modules/effect/dist/internal/schema/interpreter.js
+var flatMapTransformation = (result, current, f) => result === sameExit ? f(current) : flatMapEager2(result, f);
+function compileTransformation(transformation) {
+  if (transformation._tag === "Middleware") {
+    return (result, current, options) => {
+      const transformed = result === sameExit ? transformation.decode(succeed6(toOption(current)), options) : transformation.decode(mapEager2(result, toOption), options);
+      return fromOptionalEffect(transformed);
+    };
   }
-  return succeed5(value);
-};
-function run(ast) {
-  return runWithCompiler(normalCompiler, ast);
-}
-function runWithCompiler(compiler, ast) {
-  let parser;
-  return (input, options) => {
-    const result = (parser ??= compiler(ast))(input, options ?? defaultParseOptions);
-    if (result === sameExit) {
-      return succeed5(input);
+  const getter = transformation.decode;
+  switch (getter._tag) {
+    case "Passthrough":
+      return (result, current) => result === sameExit ? succeed6(current) : result;
+    case "Transform": {
+      const transform = (value) => value === missing ? missingExit : succeed6(getter.transform(value));
+      return (result, current) => flatMapTransformation(result, current, transform);
     }
-    if (!effectIsExit(result)) {
-      return flatMapEager2(result, getValue);
+    case "TransformOptional": {
+      const transform = (value) => fromOptionExit(getter.transform(toOption(value)));
+      return (result, current) => flatMapTransformation(result, current, transform);
     }
-    return result[args] === missing ? getValue(missing) : result;
-  };
-}
-function asExit(parser) {
-  return (input, options) => runSyncExit2(parser(input, options));
-}
-var normalCompiler = /* @__PURE__ */ memoize((ast) => makeParser(ast, normalCompiler));
-var constructorCompiler = /* @__PURE__ */ memoize((ast) => makeParser(ast, constructorCompiler, compileConstructorDefault));
-var compileDefaulted = /* @__PURE__ */ memoize((ast) => makeParser(ast, constructorCompiler, compileConstructorDefault, ast.context?.constructorDefault));
-function compileConstructorDefault(ast) {
-  return ast.context?.constructorDefault ? compileDefaulted(ast) : constructorCompiler(ast);
-}
-function applyTransformation(result, current, transformation, options) {
-  let transformed;
-  if (effectIsExit(result) && result._tag === "Success") {
-    const optional = toOption(result === sameExit ? current : result[args]);
-    transformed = transformation._tag === "Transformation" ? transformation.decode.run(optional, options) : transformation.decode(succeed6(optional), options);
-  } else if (transformation._tag === "Transformation") {
-    transformed = flatMapEager2(result, (value) => transformation.decode.run(toOption(value), options));
-  } else {
-    transformed = transformation.decode(mapEager2(result, toOption), options);
+    case "TransformEffect":
+      return (result, current, options) => flatMapTransformation(result, current, (value) => value === missing ? missingExit : getter.transform(value, options));
+    case "TransformOptionalEffect":
+      return (result, current, options) => flatMapTransformation(result, current, (value) => fromOptionalEffect(getter.transform(toOption(value), options)));
   }
-  return effectIsExit(transformed) && transformed._tag === "Success" ? fromOptionExit(transformed[args]) : flatMapEager2(transformed, fromOptionExit);
 }
+var fromOptionalEffect = (effect) => flatMapEager2(effect, fromOptionExit);
+var wrapEncoding = (ast, input, options, effect) => catchCause2(effect, (cause) => failCauseSync2(() => map3(cause, (issue) => new Encoding(ast, issue, input, options))));
 function makeConstructorParser(descriptor, compile) {
+  const transform = compileTransformation(descriptor.link.transformation);
   let sourceParser;
   return (input, options) => {
     if (input === missing)
@@ -5039,24 +5006,45 @@ function makeConstructorParser(descriptor, compile) {
     if (descriptor.isConstructed(input))
       return sameExit;
     const result = (sourceParser ??= compile(descriptor.link.to))(input, options);
-    return applyTransformation(result, input, descriptor.link.transformation, options);
+    return transform(result, input, options);
   };
 }
-function makeParser(ast, compile, compileConstructorDefault, constructorDefault) {
-  const descriptor = compileConstructorDefault ? getConstructorDescriptor(ast) : undefined;
-  const parser = descriptor ? makeConstructorParser(descriptor, compile) : ast.getParser(compile, compileConstructorDefault);
-  const checks = ast.checks;
-  const links = constructorDefault ? ast.encoding ? [...ast.encoding, constructorDefault] : [constructorDefault] : ast.encoding;
-  const encodingChecks = ast.encodingChecks;
-  const astOptions = (checks ? checks[checks.length - 1].annotations : ast.annotations)?.["parseOptions"];
-  if (!links && !checks && !encodingChecks) {
-    if (!astOptions) {
-      return parser;
+function withDefault(ast, parser) {
+  const defaultValue = ast.context.constructorDefault;
+  return (input, options) => {
+    if (input !== missing && input !== undefined)
+      return parser(input, options);
+    const result = defaultValue;
+    if (effectIsExit(result) && result._tag === "Success") {
+      const local = parser(result[args], options);
+      return local === sameExit ? result : local;
     }
-    return (input, options) => parser(input, mergeParseOptions(options, astOptions));
+    return flatMapEager2(wrapEncoding(ast, input, options, result), (value) => {
+      const local = parser(value, options);
+      return local === sameExit ? succeed6(value) : local;
+    });
+  };
+}
+function compileField(ast, compile) {
+  const parser = compile(ast);
+  return ast.context?.constructorDefault === undefined ? parser : withDefault(ast, parser);
+}
+function compile(ast, compile, compileField, base, specialize) {
+  if (ast._tag === "Declaration") {
+    for (const parameter of ast.typeParameters)
+      compile(parameter);
+  }
+  const descriptor = compileField ? getConstructorDescriptor(ast) : undefined;
+  const parser = descriptor ? makeConstructorParser(descriptor, compile) : base ?? ast.getParser(compile, compileField);
+  const checks = ast.checks;
+  const links = ast.encoding;
+  const transformations = links?.map((link) => compileTransformation(link.transformation));
+  const encodingChecks = ast.encodingChecks;
+  if (!links && !checks && !encodingChecks) {
+    return parser;
   }
   let encodingParsers;
-  const parseLocal = (input, options) => {
+  const parseChecks = (input, options) => {
     let result = parser(input, options);
     if (encodingChecks && !options.disableChecks) {
       if (effectIsExit(result)) {
@@ -5106,18 +5094,16 @@ function makeParser(ast, compile, compileConstructorDefault, constructorDefault)
     }
     return result;
   };
+  const parseLocal = specialize === undefined ? parseChecks : specialize(parseChecks);
   if (!links) {
-    return astOptions ? (input, options) => parseLocal(input, mergeParseOptions(options, astOptions)) : parseLocal;
+    return parseLocal;
   }
   return (input, options) => {
-    if (astOptions) {
-      options = mergeParseOptions(options, astOptions);
-    }
     const parsers = encodingParsers ??= links.map((link) => compile(link.to));
     let current = input;
     let result = parsers[parsers.length - 1](input, options);
     for (let i = links.length - 1;i >= 0; i--) {
-      result = applyTransformation(result, current, links[i].transformation, options);
+      result = transformations[i](result, current, options);
       if (i !== 0) {
         const next = parsers[i - 1];
         if (result._tag === "Success") {
@@ -5136,7 +5122,7 @@ function makeParser(ast, compile, compileConstructorDefault, constructorDefault)
       const local = parseLocal(value, options);
       return local === sameExit ? result : local;
     }
-    result = catchCause2(result, (cause) => failCauseSync2(() => map5(cause, (issue) => new Encoding(ast, issue, input, options))));
+    result = wrapEncoding(ast, input, options, result);
     return flatMapEager2(result, (value) => {
       const local = parseLocal(value, options);
       return local === sameExit ? succeed6(value) : local;
@@ -5144,10 +5130,280 @@ function makeParser(ast, compile, compileConstructorDefault, constructorDefault)
   };
 }
 
-// node_modules/effect/dist/internal/schema/schema.js
+// node_modules/effect/dist/internal/schema/compilerRegistry.js
+var invalid = /* @__PURE__ */ Symbol();
+var cache = /* @__PURE__ */ new WeakMap;
+var compiler;
+var compilerAdaptersEnabled = false;
+var decodeChild = (ast) => compilerAdaptersEnabled ? lazyParser(resolve2, ast, "parser") : resolve2(ast).parser;
+var makeChild = (ast) => compilerAdaptersEnabled ? lazyParser(resolve2, ast, "makeEffect") : resolve2(ast).makeEffect;
+var makeField = (ast) => compileField(ast, makeChild);
+
+class InterpretedEntry {
+  ast;
+  constructor(ast) {
+    this.ast = ast;
+  }
+  get decodeEffect() {
+    return this.cachedDecodeEffect ??= compile(this.ast, decodeChild);
+  }
+  get parser() {
+    return this.decodeEffect;
+  }
+  get makeEffect() {
+    return this.cachedMakeEffect ??= compile(this.ast, makeChild, makeField);
+  }
+}
+
+class CompilerEntry extends InterpretedEntry {
+  compiled;
+  resolve;
+  constructor(ast, compiled, resolve) {
+    super(ast);
+    this.compiled = compiled;
+    this.resolve = resolve;
+  }
+  save(key, value) {
+    Object.defineProperty(this, key, {
+      value
+    });
+    return value;
+  }
+  operation(key) {
+    const compiled = this.compiled;
+    return typeof compiled === "function" ? compiled(this.ast, this.resolve, key) : compiled?.[key];
+  }
+  get is() {
+    return this.save("is", this.operation("is"));
+  }
+  get decode() {
+    return this.save("decode", this.operation("decode"));
+  }
+  get make() {
+    return this.save("make", this.operation("make"));
+  }
+  get decodeEffect() {
+    return this.save("decodeEffect", this.operation("decodeEffect") ?? compile(this.ast, (ast) => lazyParser(this.resolve, ast, "parser")));
+  }
+  get parser() {
+    const decode = this.decode;
+    return decode === undefined ? this.decodeEffect : this.save("parser", withDecode(decode, () => this.decodeEffect));
+  }
+  get makeEffect() {
+    const makeEffect = this.operation("makeEffect");
+    if (makeEffect !== undefined)
+      return this.save("makeEffect", makeEffect);
+    const child = (ast) => lazyParser(this.resolve, ast, "makeEffect");
+    return this.save("makeEffect", compile(this.ast, child, (ast) => compileField(ast, child)));
+  }
+}
+function withDecode(fastDecode, decodeEffect) {
+  let detailed;
+  return (input, options) => {
+    if (input !== missing) {
+      try {
+        const value = fastDecode(input, options);
+        if (value !== invalid)
+          return value === input ? sameExit : succeed6(value);
+      } catch (error) {
+        return die3(error);
+      }
+    }
+    return (detailed ??= decodeEffect())(input, options);
+  };
+}
+function lazyParser(resolve, ast, operation) {
+  const entry = resolve(ast);
+  if (entry.compiled === undefined || Object.hasOwn(entry, operation)) {
+    return entry[operation];
+  }
+  let parser;
+  return (input, options) => (parser ??= entry[operation])(input, options);
+}
+function resolve2(ast) {
+  const cached = cache.get(ast);
+  if (cached !== undefined)
+    return cached;
+  const entry = compiler === undefined ? new InterpretedEntry(ast) : new CompilerEntry(ast, compiler(ast, resolve2), resolve2);
+  cache.set(ast, entry);
+  return entry;
+}
+
+// node_modules/effect/dist/SchemaParser.js
+function makeEffect(schema) {
+  const ast = schema.ast;
+  let parser;
+  return (input, options) => {
+    return (parser ??= runWithCompiler(constructorCompiler, toType(ast)))(input, options?.disableChecks ? options?.parseOptions ? {
+      ...options.parseOptions,
+      disableChecks: true
+    } : {
+      disableChecks: true
+    } : options?.parseOptions);
+  };
+}
+function makeOption(schema) {
+  const parser = makeEffect(schema);
+  return (input, options) => {
+    const exit = runSyncExit2(parser(input, options));
+    if (isSuccess3(exit)) {
+      return some2(exit.value);
+    }
+    getSchemaIssueOrThrow(exit.cause, "Option adapter can only return none for schema issues");
+    return none2();
+  };
+}
+function make6(schema) {
+  return makeConstructorSync(toType(schema.ast));
+}
+function is(schema) {
+  return _is(schema.ast);
+}
+function makeIs(ast) {
+  if (!compilerAdaptersEnabled) {
+    const parser = asExit(run(ast));
+    return (input) => {
+      const exit = parser(input, defaultParseOptions);
+      if (isSuccess3(exit))
+        return true;
+      getSchemaIssueOrThrow(exit.cause, "Type guard adapter can only return false for schema issues");
+      return false;
+    };
+  }
+  const entry = resolve2(ast);
+  const guard = entry.is;
+  if (guard !== undefined) {
+    return (input) => {
+      try {
+        return guard(input, defaultParseOptions);
+      } catch (error) {
+        getSchemaIssueOrThrow(die2(error), "Type guard adapter can only return false for schema issues");
+        return false;
+      }
+    };
+  }
+  const parser = entry.parser;
+  return (input) => {
+    const exit = runSyncExit2(parserResult(parser(input, defaultParseOptions), input));
+    if (isSuccess3(exit))
+      return true;
+    getSchemaIssueOrThrow(exit.cause, "Type guard adapter can only return false for schema issues");
+    return false;
+  };
+}
+function _is(ast) {
+  const typeAST = toType(ast);
+  let guard = (input) => {
+    guard = makeIs(typeAST);
+    return guard(input);
+  };
+  return (input) => {
+    return guard(input);
+  };
+}
+var getValue = (value) => {
+  if (value === missing) {
+    return fail5(new InvalidValue);
+  }
+  return succeed5(value);
+};
+function run(ast) {
+  return runWithCompiler(normalCompiler, ast);
+}
+function parserResult(result, input) {
+  if (result === sameExit) {
+    return succeed5(input);
+  }
+  if (!effectIsExit(result)) {
+    return flatMapEager2(result, getValue);
+  }
+  return result[args] === missing ? getValue(missing) : result;
+}
+function runWithCompiler(compiler, ast) {
+  let parser;
+  return (input, options) => {
+    const result = (parser ??= compiler(ast))(input, options ?? defaultParseOptions);
+    if (result === sameExit) {
+      return succeed5(input);
+    }
+    if (!effectIsExit(result)) {
+      return flatMapEager2(result, getValue);
+    }
+    return result[args] === missing ? getValue(missing) : result;
+  };
+}
+function asExit(parser) {
+  return (input, options) => runSyncExit2(parser(input, options));
+}
+function runSync2(effect, message) {
+  const exit = runSyncExit2(effect);
+  if (isSuccess3(exit)) {
+    return exit.value;
+  }
+  const issue = getSchemaIssueOrThrow(exit.cause, message);
+  throw new Error("Schema validation failed", {
+    cause: issue
+  });
+}
+function makeConstructorSync(ast) {
+  let entry;
+  let parser;
+  return (input, options) => {
+    entry ??= resolve2(ast);
+    const parseOptions = options?.disableChecks ? options.parseOptions ? {
+      ...options.parseOptions,
+      disableChecks: true
+    } : {
+      disableChecks: true
+    } : options?.parseOptions ?? defaultParseOptions;
+    const make = entry.make;
+    if (make !== undefined && input !== missing) {
+      let output;
+      try {
+        output = make(input, parseOptions);
+      } catch (error) {
+        getSchemaIssueOrThrow(die2(error), "Constructor adapter can only throw schema issues");
+        throw error;
+      }
+      if (output !== invalid && output !== missing)
+        return output;
+    }
+    const result = (parser ??= entry.makeEffect)(input, parseOptions);
+    return runSync2(parserResult(result, input), "Constructor adapter can only throw schema issues");
+  };
+}
+var normalCompiler = (ast) => resolve2(ast).parser;
+var constructorCompiler = (ast) => resolve2(ast).makeEffect;
+
+// node_modules/effect/dist/internal/schema/make.js
 var TypeId8 = "~effect/Schema/Schema";
+var RebuildOptions = /* @__PURE__ */ Symbol();
 var SchemaProto = {
   [TypeId8]: TypeId8,
+  get make() {
+    const value = make6(this);
+    Object.defineProperty(this, "make", {
+      value,
+      enumerable: true
+    });
+    return value;
+  },
+  get makeEffect() {
+    const value = makeEffect(this);
+    Object.defineProperty(this, "makeEffect", {
+      value,
+      enumerable: true
+    });
+    return value;
+  },
+  get makeOption() {
+    const value = makeOption(this);
+    Object.defineProperty(this, "makeOption", {
+      value,
+      enumerable: true
+    });
+    return value;
+  },
   pipe() {
     return pipeArguments(this, arguments);
   },
@@ -5159,53 +5415,44 @@ var SchemaProto = {
   },
   check(...checks) {
     return this.rebuild(appendChecks(this.ast, checks));
+  },
+  rebuild(ast) {
+    return make7(ast, this[RebuildOptions]);
   }
 };
-function make8(ast, options) {
+function make7(ast, options) {
   function Schema() {}
-  const self2 = Object.defineProperties(Object.setPrototypeOf(Schema, SchemaProto), Object.getOwnPropertyDescriptors({
-    ...options
-  }));
+  const self2 = Object.setPrototypeOf(Schema, SchemaProto);
+  if (options && (Object.hasOwn(options, "name") || Object.hasOwn(options, "length") || Object.hasOwn(options, "__proto__"))) {
+    Object.defineProperties(self2, Object.getOwnPropertyDescriptors({
+      ...options
+    }));
+  } else {
+    Object.assign(self2, options);
+  }
+  self2[RebuildOptions] = options;
   self2.ast = ast;
-  self2.rebuild = (ast) => make8(ast, options);
-  self2.makeEffect = makeEffect(self2);
-  self2.make = make7(self2);
-  self2.makeOption = makeOption(self2);
   return self2;
 }
 
-// node_modules/effect/dist/Struct.js
-var omit = /* @__PURE__ */ dual(2, (self2, keys) => {
-  return buildStruct(self2, (k, v) => !keys.includes(k) ? [k, v] : undefined);
-});
-var lambda = (f) => f;
-function buildStruct(source, f) {
-  const out = {};
-  for (const k of Reflect.ownKeys(source)) {
-    if (!Object.prototype.propertyIsEnumerable.call(source, k))
-      continue;
-    const res = f(k, source[k]);
-    if (res) {
-      const [nk, nv] = res;
-      assignProperty(out, nk, nv);
-    }
-  }
-  return out;
-}
+// node_modules/effect/dist/RegExp.js
+var RegExp2 = globalThis.RegExp;
+var escape = (string) => string.replace(/[/\\^$*+?.()|[\]{}]/g, "\\$&");
 
 // node_modules/effect/dist/internal/schema/toEquivalence.js
 var toEquivalence = /* @__PURE__ */ memoize((ast) => {
-  return recur(ast, []);
+  return recur(ast);
 });
-function recur(ast, path) {
+function recur(ast) {
   const annotation = resolve(ast)?.["toEquivalence"];
   if (annotation) {
-    return annotation(isDeclaration(ast) ? ast.typeParameters.map((tp) => recur(tp, path)) : []);
+    return annotation(isDeclaration(ast) ? ast.typeParameters.map(recur) : []);
   }
   switch (ast._tag) {
     case "Never":
       return strictEqual();
     case "Declaration":
+      return declarationEquivalence(ast);
     case "Null":
     case "Undefined":
     case "Void":
@@ -5223,9 +5470,10 @@ function recur(ast, path) {
     case "TemplateLiteral":
       return equals;
     case "Arrays": {
-      const elements = ast.elements.map((e, i) => recur(e, [...path, i]));
-      const len = ast.elements.length;
-      const rest = ast.rest.map((r, i) => recur(r, [...path, len + i]));
+      const elements = ast.elements.map(recur);
+      const rest = ast.rest.map(recur);
+      const [head, ...tail] = rest;
+      const tailLength = tail.length;
       return make((a, b) => {
         if (!Array.isArray(a) || !Array.isArray(b)) {
           return false;
@@ -5241,13 +5489,12 @@ function recur(ast, path) {
           }
         }
         if (rest.length > 0) {
-          const [head, ...tail] = rest;
-          for (;i < len - tail.length; i++) {
+          for (;i < len - tailLength; i++) {
             if (!head(a[i], b[i])) {
               return false;
             }
           }
-          for (let j = 0;j < tail.length; j++) {
+          for (let j = 0;j < tailLength; j++) {
             if (!tail[j](a[i + j], b[i + j])) {
               return false;
             }
@@ -5260,8 +5507,8 @@ function recur(ast, path) {
       if (ast.propertySignatures.length === 0 && ast.indexSignatures.length === 0) {
         return equals;
       }
-      const propertySignatures = ast.propertySignatures.map((ps) => recur(ps.type, [...path, ps.name]));
-      const indexSignatures = ast.indexSignatures.map((is) => recur(is.type, path));
+      const propertySignatures = ast.propertySignatures.map((ps) => recur(ps.type));
+      const indexSignatures = ast.indexSignatures.map((is) => recur(is.type));
       return make((a, b) => {
         if (!isObject(a) || !isObject(b)) {
           return false;
@@ -5298,11 +5545,12 @@ function recur(ast, path) {
     }
     case "Union": {
       const types = toType(ast).types;
-      const compiled = new Map(types.map((candidate, i) => [candidate, [_is(candidate), recur(ast.types[i], path)]]));
+      const index = getCandidateIndex(types);
+      const compiled = types.map((candidate, i) => [_is(candidate), recur(ast.types[i])]);
       return make((a, b) => {
-        const candidates = getCandidates(a, types);
+        const candidates = index(a, false);
         for (let i = 0;i < candidates.length; i++) {
-          const [is, equivalence] = compiled.get(candidates[i]);
+          const [is, equivalence] = compiled[candidates[i]];
           if (is(a) && is(b)) {
             return equivalence(a, b);
           }
@@ -5311,21 +5559,100 @@ function recur(ast, path) {
       });
     }
     case "Suspend": {
-      const get = memoizeThunk(() => recur(ast.thunk(), path));
-      return make((a, b) => get()(a, b));
+      let equivalence;
+      return make((a, b) => (equivalence ??= toEquivalence(ast.thunk()))(a, b));
     }
   }
 }
+function declarationEquivalence(ast) {
+  const representation = ast.annotations?.representation;
+  if (representation === undefined)
+    return equals;
+  switch (representation.id) {
+    case "effect/schema/Option": {
+      const [value] = declarationTypeParameters(ast);
+      return (a, b) => a._tag === b._tag && (a._tag === "None" || value(a.value, b.value));
+    }
+    case "effect/schema/Result": {
+      const [success, failure] = declarationTypeParameters(ast);
+      return (a, b) => a._tag === b._tag && (a._tag === "Success" ? success(a.success, b.success) : failure(a.failure, b.failure));
+    }
+    case "effect/schema/CauseReason": {
+      const [error, defect] = declarationTypeParameters(ast);
+      return causeReasonEquivalence(error, defect);
+    }
+    case "effect/schema/Cause": {
+      const [error, defect] = declarationTypeParameters(ast);
+      return causeEquivalence(error, defect);
+    }
+    case "effect/schema/Exit": {
+      const [value, error, defect] = declarationTypeParameters(ast);
+      const cause = causeEquivalence(error, defect);
+      return (a, b) => a._tag === b._tag && (a._tag === "Success" ? value(a.value, b.value) : cause(a.cause, b.cause));
+    }
+    case "effect/schema/ReadonlyMap": {
+      const [key, value] = declarationTypeParameters(ast);
+      return makeCompareMap(key, value);
+    }
+    case "effect/schema/ReadonlySet":
+      return makeCompareSet(declarationTypeParameters(ast)[0]);
+    case "effect/schema/RegExp":
+      return (a, b) => a.source === b.source && a.flags === b.flags;
+    case "effect/schema/URL":
+      return (a, b) => a.toString() === b.toString();
+    default:
+      return equals;
+  }
+}
+function declarationTypeParameters(ast) {
+  return ast.typeParameters.map(recur);
+}
+function causeReasonEquivalence(error, defect) {
+  return (a, b) => {
+    if (a._tag !== b._tag)
+      return false;
+    switch (a._tag) {
+      case "Fail":
+        return error(a.error, b.error);
+      case "Die":
+        return defect(a.defect, b.defect);
+      case "Interrupt":
+        return a.fiberId === b.fiberId;
+    }
+  };
+}
+function causeEquivalence(error, defect) {
+  const reasons = Array_(causeReasonEquivalence(error, defect));
+  return (a, b) => reasons(a.reasons, b.reasons);
+}
 
-// node_modules/effect/dist/RegExp.js
-var RegExp2 = globalThis.RegExp;
-var escape = (string) => string.replace(/[/\\^$*+?.()|[\]{}]/g, "\\$&");
+// node_modules/effect/dist/Struct.js
+var omit = /* @__PURE__ */ dual(2, (self2, keys) => {
+  return buildStruct(self2, (k, v) => !hasPropertyKey(keys, k) ? [k, v] : undefined);
+});
+var lambda = (f) => f;
+function hasPropertyKey(keys, key) {
+  return keys.some((candidate) => candidate === key || typeof candidate === "number" && String(candidate) === key);
+}
+function buildStruct(source, f) {
+  const out = {};
+  for (const k of Reflect.ownKeys(source)) {
+    if (!Object.prototype.propertyIsEnumerable.call(source, k))
+      continue;
+    const res = f(k, source[k]);
+    if (res) {
+      const [nk, nv] = res;
+      assignProperty(out, nk, nv);
+    }
+  }
+  return out;
+}
 
 // node_modules/effect/dist/Schema.js
 var TypeId9 = TypeId8;
 function declareConstructor() {
   return (typeParameters, run, annotations) => {
-    return make9(new Declaration(typeParameters.map(getAST), (typeParameters) => run(typeParameters.map((ast) => make9(ast))), annotations));
+    return make8(new Declaration(typeParameters.map(getAST), (typeParameters) => run(typeParameters.map((ast) => make8(ast))), annotations));
   };
 }
 function declare(is, annotations) {
@@ -5334,28 +5661,27 @@ function declare(is, annotations) {
 function annotate2(annotations) {
   return (self2) => self2.annotate(annotations);
 }
-var is2 = is;
-var make9 = make8;
+var make8 = make7;
 function isSchema(u) {
   return hasProperty(u, TypeId9) && u[TypeId9] === TypeId9;
 }
-var optionalKey2 = /* @__PURE__ */ lambda((schema) => make9(optionalKey(schema.ast), {
+var optionalKey2 = /* @__PURE__ */ lambda((schema) => make8(optionalKey(schema.ast), {
   schema
 }));
 var optional2 = /* @__PURE__ */ lambda((self2) => {
   const schema = UndefinedOr(self2);
-  return make9(optional(self2.ast), {
+  return make8(optional(self2.ast), {
     schema
   });
 });
-var toType2 = /* @__PURE__ */ lambda((schema) => make9(toType(schema.ast), {
+var toType2 = /* @__PURE__ */ lambda((schema) => make8(toType(schema.ast), {
   schema
 }));
-var toEncoded2 = /* @__PURE__ */ lambda((schema) => make9(toEncoded(schema.ast), {
+var toEncoded2 = /* @__PURE__ */ lambda((schema) => make8(toEncoded(schema.ast), {
   schema
 }));
 function Literal2(literal) {
-  const out = make9(new Literal(literal), {
+  const out = make8(new Literal(literal), {
     literal,
     transform(to) {
       return out.pipe(decodeTo2(Literal2(to), {
@@ -5366,15 +5692,15 @@ function Literal2(literal) {
   });
   return out;
 }
-var Any2 = /* @__PURE__ */ make9(any);
-var Unknown2 = /* @__PURE__ */ make9(unknown);
-var Null2 = /* @__PURE__ */ make9(null_);
-var Undefined2 = /* @__PURE__ */ make9(undefined_2);
-var String5 = /* @__PURE__ */ make9(string2);
-var Number5 = /* @__PURE__ */ make9(number2);
-var Boolean3 = /* @__PURE__ */ make9(boolean);
+var Any2 = /* @__PURE__ */ make8(any);
+var Unknown2 = /* @__PURE__ */ make8(unknown);
+var Null2 = /* @__PURE__ */ make8(null_);
+var Undefined2 = /* @__PURE__ */ make8(undefined_2);
+var String5 = /* @__PURE__ */ make8(string2);
+var Number5 = /* @__PURE__ */ make8(number2);
+var Boolean2 = /* @__PURE__ */ make8(boolean);
 function makeStruct(ast, fields) {
-  return make9(ast, {
+  return make8(ast, {
     fields,
     mapFields(f, options) {
       const fields = f(this.fields);
@@ -5386,19 +5712,19 @@ function Struct(fields) {
   return makeStruct(struct(fields, undefined), fields);
 }
 function Record(key, value) {
-  return make9(record(key.ast, value.ast), {
+  return make8(record(key.ast, value.ast), {
     key,
     value
   });
 }
 function StructWithRest(schema, records) {
-  return make9(structWithRest(schema.ast, records.map(getAST)), {
+  return make8(structWithRest(schema.ast, records.map(getAST)), {
     schema,
     records
   });
 }
 function makeTuple(ast, elements) {
-  return make9(ast, {
+  return make8(ast, {
     elements,
     mapElements(f, options) {
       const elements = f(this.elements);
@@ -5409,27 +5735,27 @@ function makeTuple(ast, elements) {
 function Tuple(elements) {
   return makeTuple(tuple(elements), elements);
 }
-var ArraySchema = /* @__PURE__ */ lambda((schema) => make9(new Arrays(false, [], [schema.ast]), {
+var ArraySchema = /* @__PURE__ */ lambda((schema) => make8(new Arrays(false, [], [schema.ast]), {
   value: schema
 }));
-var NonEmptyArray = /* @__PURE__ */ lambda((schema) => make9(new Arrays(false, [schema.ast], [schema.ast]), {
+var NonEmptyArray = /* @__PURE__ */ lambda((schema) => make8(new Arrays(false, [schema.ast], [schema.ast]), {
   value: schema
 }));
 function makeUnion(ast, members) {
-  return make9(ast, {
+  return make8(ast, {
     members,
     mapMembers(f, options) {
       const members = f(this.members);
-      return makeUnion(union2(members, this.ast.mode, options?.unsafePreserveChecks ? this.ast.checks : undefined), members);
+      return makeUnion(union(members, this.ast.options, options?.unsafePreserveChecks ? this.ast.checks : undefined), members);
     }
   });
 }
 function Union2(members, options) {
-  return makeUnion(union2(members, options?.mode ?? "anyOf", undefined), members);
+  return makeUnion(union(members, options, undefined), members);
 }
 function Literals(literals) {
   const members = literals.map(Literal2);
-  return make9(union2(members, "anyOf", undefined), {
+  return make8(union(members, undefined, undefined), {
     literals,
     members,
     mapMembers(f) {
@@ -5445,28 +5771,34 @@ function Literals(literals) {
 }
 var NullOr = /* @__PURE__ */ lambda((self2) => Union2([self2, Null2]));
 var UndefinedOr = /* @__PURE__ */ lambda((self2) => Union2([self2, Undefined2]));
-function suspend2(f) {
-  return make9(new Suspend(() => f().ast));
+function suspend3(f) {
+  return make8(new Suspend(() => f().ast));
 }
 function check(...checks) {
   return (self2) => self2.check(...checks);
 }
-function brand2(identifier) {
-  return (schema) => make9(brand(schema.ast, identifier), {
+function brand(identifier) {
+  return (schema) => make8(schema.ast, {
     schema,
     identifier
   });
 }
 function decodeTo2(to, transformation) {
   return (from) => {
-    return make9(decodeTo(from.ast, to.ast, transformation ? make6(transformation) : passthrough2()), {
+    return make8(decodeTo(from.ast, to.ast, transformation ? makeTransformation(transformation) : passthrough2()), {
       from,
       to
     });
   };
 }
+function linkDecoding() {
+  return (to, decode) => link()(to, {
+    decode,
+    encode: forbiddenEncoding
+  });
+}
 function withConstructorDefault2(defaultValue) {
-  return (schema) => make9(withConstructorDefault(schema.ast, defaultValue), {
+  return (schema) => make8(withConstructorDefault(schema.ast, defaultValue), {
     schema
   });
 }
@@ -5511,7 +5843,7 @@ function toTaggedUnion(tag) {
           discriminantKeys.add(key);
           discriminants.push(literal);
           assignProperty(cases, literal, schema);
-          assignProperty(guards, literal, is2(toType2(schema)));
+          assignProperty(guards, literal, is(toType2(schema)));
           return;
         }
       }
@@ -5556,7 +5888,7 @@ function instanceOf(constructor, annotations) {
 }
 function link() {
   return (encodeTo, transformation) => {
-    return new Link(encodeTo.ast, make6(transformation));
+    return new Link(encodeTo.ast, makeTransformation(transformation));
   };
 }
 var makeFilter2 = makeFilter;
@@ -5575,10 +5907,11 @@ function isTrimmed(annotations) {
     toCode: () => ({
       runtime: "Schema.isTrimmed()"
     }),
-    arbitrary: {
-      constraint: {
-        patterns: [TRIMMED_PATTERN]
-      }
+    arbitraryConstraint: {
+      patterns: [{
+        source: TRIMMED_PATTERN,
+        flags: ""
+      }]
     },
     ...annotations
   });
@@ -5586,8 +5919,12 @@ function isTrimmed(annotations) {
 function isPattern2(regExp, annotations) {
   const source = regExp.source;
   const flags = regExp.flags;
+  const canExport = /^[dg]*uy?$/.test(flags);
   const runtimeRegExp = flags === "" ? `new RegExp(${format(source)})` : `new RegExp(${format(source)}, ${format(flags)})`;
   return isPattern(regExp, {
+    toJsonSchema: () => canExport ? {
+      pattern: flags.endsWith("y") ? `^(?:${source})` : source
+    } : [{}, true],
     toCode: () => ({
       runtime: `Schema.isPattern(${runtimeRegExp})`
     }),
@@ -5611,46 +5948,50 @@ function isBase64(annotations) {
     ...annotations
   });
 }
-function isStartsWith(startsWith, annotations) {
+function literalToJsonSchema(literal, original, pattern) {
+  if (literal.length === 0)
+    return original.length === 0 ? {} : [{}, true];
+  const constraint = {
+    pattern: new globalThis.RegExp(pattern).source
+  };
+  return literal === original ? constraint : [constraint, true];
+}
+function isStartingWith(startsWith, annotations) {
   const formatted = JSON.stringify(startsWith);
   const regExp = new globalThis.RegExp(`^${escape(startsWith)}`);
+  const jsonSchemaLiteral = startsWith.replace(/[\uD800-\uDBFF]$/, "");
   return makeFilter2((s) => s.startsWith(startsWith), {
     expected: `a string starting with ${formatted}`,
     representation: {
-      id: "effect/schema/isStartsWith",
+      id: "effect/schema/isStartingWith",
       payload: {
         startsWith
       }
     },
-    toJsonSchema: () => ({
-      pattern: regExp.source
-    }),
+    toJsonSchema: () => literalToJsonSchema(jsonSchemaLiteral, startsWith, `^${escape(jsonSchemaLiteral)}`),
     toCode: () => ({
-      runtime: `Schema.isStartsWith(${format(startsWith)})`
+      runtime: `Schema.isStartingWith(${format(startsWith)})`
     }),
-    arbitrary: {
-      constraint: {
-        patterns: [regExp.source]
-      }
+    arbitraryConstraint: {
+      patterns: [{
+        source: regExp.source,
+        flags: regExp.flags
+      }]
     },
     ...annotations
   });
 }
-var Finite = /* @__PURE__ */ make9(finite);
+var Finite = /* @__PURE__ */ make8(finite);
 function makeIsGreaterThan(options) {
   const gt = isGreaterThan(options.order);
   const formatter = options.formatter ?? format;
   return (exclusiveMinimum, annotations) => {
     return makeFilter2((input) => gt(input, exclusiveMinimum), {
       expected: `a value greater than ${formatter(exclusiveMinimum)}`,
-      arbitrary: {
-        constraint: {
-          ordered: {
-            order: options.order,
-            minimum: exclusiveMinimum,
-            exclusiveMinimum: true
-          }
-        }
+      arbitraryConstraint: {
+        order: options.order,
+        minimum: exclusiveMinimum,
+        exclusiveMinimum: true
       },
       ...options.annotate?.(exclusiveMinimum),
       ...annotations
@@ -5663,13 +6004,9 @@ function makeIsGreaterThanOrEqualTo(options) {
   return (minimum, annotations) => {
     return makeFilter2((input) => gte(input, minimum), {
       expected: `a value greater than or equal to ${formatter(minimum)}`,
-      arbitrary: {
-        constraint: {
-          ordered: {
-            order: options.order,
-            minimum
-          }
-        }
+      arbitraryConstraint: {
+        order: options.order,
+        minimum
       },
       ...options.annotate?.(minimum),
       ...annotations
@@ -5682,13 +6019,9 @@ function makeIsLessThanOrEqualTo(options) {
   return (maximum, annotations) => {
     return makeFilter2((input) => lte(input, maximum), {
       expected: `a value less than or equal to ${formatter(maximum)}`,
-      arbitrary: {
-        constraint: {
-          ordered: {
-            order: options.order,
-            maximum
-          }
-        }
+      arbitraryConstraint: {
+        order: options.order,
+        maximum
       },
       ...options.annotate?.(maximum),
       ...annotations
@@ -5706,19 +6039,15 @@ function makeIsBetween(deriveOptions) {
     const lte = options.exclusiveMaximum ? lessThan : lessThanOrEqualTo;
     return makeFilter2((input) => gte(input, options.minimum) && lte(input, options.maximum), {
       expected: `a value between ${formatter(options.minimum)}${options.exclusiveMinimum ? " (excluded)" : ""} and ${formatter(options.maximum)}${options.exclusiveMaximum ? " (excluded)" : ""}`,
-      arbitrary: {
-        constraint: {
-          ordered: {
-            order: deriveOptions.order,
-            minimum: options.minimum,
-            maximum: options.maximum,
-            ...options.exclusiveMinimum && {
-              exclusiveMinimum: true
-            },
-            ...options.exclusiveMaximum && {
-              exclusiveMaximum: true
-            }
-          }
+      arbitraryConstraint: {
+        order: deriveOptions.order,
+        minimum: options.minimum,
+        maximum: options.maximum,
+        ...options.exclusiveMinimum && {
+          exclusiveMinimum: true
+        },
+        ...options.exclusiveMaximum && {
+          exclusiveMaximum: true
         }
       },
       ...deriveOptions.annotate?.(options),
@@ -5783,7 +6112,7 @@ var isLessThanOrEqualTo3 = /* @__PURE__ */ makeIsLessThanOrEqualTo({
     })
   })
 });
-var isBetween2 = /* @__PURE__ */ makeIsBetween({
+var isBetween = /* @__PURE__ */ makeIsBetween({
   order: Number2,
   annotate: (options) => {
     const exclusiveMinimum = options.exclusiveMinimum ? true : undefined;
@@ -5820,23 +6149,20 @@ function isInt(annotations) {
       id: "effect/schema/isInt",
       payload: null
     },
-    toJsonSchema: () => ({
+    toJsonSchema: () => [{
       type: "integer"
-    }),
+    }, true],
     toCode: () => ({
       runtime: "Schema.isInt()"
     }),
-    arbitrary: {
-      constraint: {
-        integer: true
-      }
+    arbitraryConstraint: {
+      number: "integer"
     },
     ...annotations
   });
 }
 var Int = /* @__PURE__ */ Number5.check(/* @__PURE__ */ isInt());
-function isMinLength(minLength, annotations) {
-  minLength = Math.max(0, Math.floor(minLength));
+function makeIsMinLength(minLength, minCodePoints, annotations) {
   return makeFilter2((input) => input.length >= minLength, {
     expected: `a value with a length of at least ${minLength}`,
     representation: {
@@ -5847,25 +6173,28 @@ function isMinLength(minLength, annotations) {
     },
     toJsonSchema: ({
       type
-    }) => type === "array" ? {
+    }) => type === "string" ? minLength <= 1 ? {
+      minLength: minCodePoints
+    } : [{
+      minLength: minCodePoints
+    }, true] : type === "array" ? {
       minItems: minLength
-    } : {
-      minLength
-    },
+    } : type === undefined ? [{
+      minLength: minCodePoints,
+      minItems: minLength
+    }, true] : [{}, true],
     toCode: () => ({
       runtime: `Schema.isMinLength(${minLength})`
     }),
     [STRUCTURAL_ANNOTATION_KEY]: true,
-    arbitrary: {
-      constraint: {
-        minLength
-      }
+    arbitraryConstraint: {
+      minLength
     },
     ...annotations
   });
 }
 function isNonEmpty(annotations) {
-  return isMinLength(1, annotations);
+  return makeIsMinLength(1, 1, annotations);
 }
 var getErrorOptionsKey = (options) => (options?.includeStack === true ? 1 : 0) | (options?.excludeCause === true ? 2 : 0);
 var getErrorOptions = (key) => {
@@ -5911,7 +6240,7 @@ var RegExp3 = /* @__PURE__ */ instanceOf(globalThis.RegExp, {
   toCodecJson: () => link()(Struct({
     source: String5,
     flags: String5
-  }), transformOrFail2({
+  }), transformEffect2({
     decode: (e, options) => try_2({
       try: () => new globalThis.RegExp(e.source, e.flags),
       catch: () => new InvalidValue({
@@ -5922,12 +6251,7 @@ var RegExp3 = /* @__PURE__ */ instanceOf(globalThis.RegExp, {
       source: regExp.source,
       flags: regExp.flags
     })
-  })),
-  toArbitrary: () => (fc) => fc.tuple(fc.constantFrom(".", ".*", "\\d+", "\\w+", "[a-z]+", "[A-Z]+", "[0-9]+", "^[a-zA-Z0-9]+$", "^\\d{4}-\\d{2}-\\d{2}$"), fc.uniqueArray(fc.constantFrom("g", "i", "m", "s", "u", "y"), {
-    minLength: 0,
-    maxLength: 6
-  }).map((flags) => flags.join(""))).map(([source, flags]) => new globalThis.RegExp(source, flags)),
-  toEquivalence: () => (a, b) => a.source === b.source && a.flags === b.flags
+  }))
 });
 var URLString = /* @__PURE__ */ String5.annotate({
   expected: "a string that will be decoded as a URL"
@@ -5942,30 +6266,8 @@ var URL2 = /* @__PURE__ */ instanceOf(globalThis.URL, {
     Type: `globalThis.URL`
   }),
   expected: "URL",
-  toCodecJson: () => link()(URLString, urlFromString),
-  toArbitrary: () => (fc) => fc.webUrl().map((s) => new globalThis.URL(s)),
-  toEquivalence: () => (a, b) => a.toString() === b.toString()
+  toCodecJson: () => link()(URLString, urlFromString)
 });
-function dateArbitraryConstraints(ordered, base, toDate) {
-  const out = {
-    ...base
-  };
-  if (ordered?.minimum !== undefined) {
-    const minimum = toDate === undefined ? ordered.minimum : toDate(ordered.minimum);
-    const nextMin = ordered.exclusiveMinimum ? new globalThis.Date(minimum.getTime() + 1) : minimum;
-    if (out.min === undefined || nextMin.getTime() > out.min.getTime()) {
-      out.min = nextMin;
-    }
-  }
-  if (ordered?.maximum !== undefined) {
-    const maximum = toDate === undefined ? ordered.maximum : toDate(ordered.maximum);
-    const nextMax = ordered.exclusiveMaximum ? new globalThis.Date(maximum.getTime() - 1) : maximum;
-    if (out.max === undefined || nextMax.getTime() < out.max.getTime()) {
-      out.max = nextMax;
-    }
-  }
-  return out;
-}
 var File2 = /* @__PURE__ */ instanceOf(globalThis.File, {
   representation: {
     id: "effect/schema/File",
@@ -5981,8 +6283,8 @@ var File2 = /* @__PURE__ */ instanceOf(globalThis.File, {
     type: String5,
     name: String5,
     lastModified: Int
-  }), transformOrFail2({
-    decode: (e, options) => match2(decodeBase64(e.data), {
+  }), transformEffect2({
+    decode: (e, options) => match2(decode(e.data), {
       onFailure: () => fail5(new InvalidValue({
         expected: "a valid Base64 string"
       }, e.data, options)),
@@ -5998,7 +6300,7 @@ var File2 = /* @__PURE__ */ instanceOf(globalThis.File, {
       try: async () => {
         const bytes = new globalThis.Uint8Array(await file.arrayBuffer());
         return {
-          data: encodeBase64(bytes),
+          data: encode(bytes),
           type: file.type,
           name: file.name,
           lastModified: file.lastModified
@@ -6026,7 +6328,7 @@ var FormData2 = /* @__PURE__ */ instanceOf(globalThis.FormData, {
   }), Struct({
     _tag: tag("File"),
     value: File2
-  })])])), transformOrFail2({
+  })])])), transformEffect2({
     decode: (e) => {
       const out = new globalThis.FormData;
       for (const [key, entry] of e) {
@@ -6087,9 +6389,36 @@ var Uint8Array2 = /* @__PURE__ */ instanceOf(globalThis.Uint8Array, {
     Type: `globalThis.Uint8Array`
   }),
   expected: "Uint8Array",
-  toCodecJson: () => link()(Base64String, uint8ArrayFromBase64String),
-  toArbitrary: () => (fc) => fc.uint8Array()
+  toCodecJson: () => link()(Base64String, uint8ArrayFromBase64String)
 });
+var dateTimeUtcFromString = /* @__PURE__ */ transformEffect2({
+  decode: (s, options) => {
+    return match(make5(s), {
+      onNone: () => fail5(new InvalidValue({
+        expected: "a valid UTC DateTime string"
+      }, s, options)),
+      onSome: (result) => succeed5(toUtc2(result))
+    });
+  },
+  encode: (utc) => succeed5(formatIso2(utc))
+});
+var arbitraryMinimumDateTimestamp = -8640000000000000;
+var arbitraryMaximumDateTimestamp = 8640000000000000;
+var arbitraryMinimumZonedDateTimeTimestamp = arbitraryMinimumDateTimestamp + 14 * 60 * 60 * 1000;
+var arbitraryMaximumZonedDateTimeTimestamp = arbitraryMaximumDateTimestamp - 14 * 60 * 60 * 1000;
+var arbitraryMinimumTimeZoneOffset = -12 * 60 * 60 * 1000;
+var arbitraryMaximumTimeZoneOffset = 14 * 60 * 60 * 1000;
+function dateTimeArbitraryBounds(constraint, domainMinimum, domainMaximum) {
+  const minimum = Math.max(domainMinimum, constraint?.minimum === undefined ? domainMinimum : constraint.minimum.epochMilliseconds + (constraint.exclusiveMinimum === true ? 1 : 0));
+  const maximum = Math.min(domainMaximum, constraint?.maximum === undefined ? domainMaximum : constraint.maximum.epochMilliseconds - (constraint.exclusiveMaximum === true ? 1 : 0));
+  return minimum <= maximum ? [minimum, maximum] : [domainMinimum, domainMaximum];
+}
+function dateTimeArbitraryInteger(minimum, maximum) {
+  return Int.check(isBetween({
+    minimum,
+    maximum
+  }));
+}
 var DateTimeUtc = /* @__PURE__ */ declare((u) => isDateTime2(u) && isUtc2(u), {
   representation: {
     id: "effect/schema/DateTimeUtc",
@@ -6101,12 +6430,14 @@ var DateTimeUtc = /* @__PURE__ */ declare((u) => isDateTime2(u) && isUtc2(u), {
     importDeclarations: [`import * as DateTime from "effect/DateTime"`]
   }),
   expected: "DateTime.Utc",
+  toCodecArbitrary: ({
+    constraint
+  }) => {
+    const [minimum, maximum] = dateTimeArbitraryBounds(constraint, arbitraryMinimumDateTimestamp, arbitraryMaximumDateTimestamp);
+    return linkDecoding()(dateTimeArbitraryInteger(minimum, maximum), transform(makeUnsafe3));
+  },
   toCodecJson: () => link()(String5, dateTimeUtcFromString),
-  toArbitrary: () => (fc, ctx) => fc.date(dateArbitraryConstraints(ctx?.constraint?.ordered?.order === Order2 ? ctx.constraint.ordered : undefined, {
-    noInvalidDate: true
-  }, toDateUtc2)).map((date) => fromDateUnsafe2(date)),
-  toFormatter: () => (utc) => utc.toString(),
-  toEquivalence: () => Equivalence2
+  toFormatter: () => (utc) => utc.toString()
 });
 var immerable = /* @__PURE__ */ globalThis.Symbol.for("immer-draftable");
 var payloadToken = {};
@@ -6144,7 +6475,7 @@ function makeClass(Inherited, identifier, struct2, annotations, proto) {
       return getClassSchema(this).rebuild(ast);
     }
     static make(input, options) {
-      return new this(input, options);
+      return make6(getClassSchema(this))(input ?? {}, options);
     }
     static makeOption(input, options) {
       return makeOption(getClassSchema(this))(input ?? {}, options);
@@ -6203,7 +6534,7 @@ function getClassSchemaFactory(from, identifier, annotations) {
     const ClassTypeId = getClassTypeId(identifier);
     const isClassValue = (input) => input instanceof self2 || hasProperty(input, ClassTypeId);
     const transformation = getClassTransformation(self2);
-    const to = make9(new Declaration([from.ast], () => (input, ast, options) => {
+    const to = make8(new Declaration([from.ast], () => (input, ast, options) => {
       return isClassValue(input) ? succeed5(input) : fail5(new InvalidType(ast, input, options));
     }, {
       identifier,
@@ -6212,10 +6543,7 @@ function getClassSchemaFactory(from, identifier, annotations) {
         link: new Link(from, transformation)
       }),
       toCodec: ([from]) => new Link(from.ast, transformation),
-      toArbitrary: ([from]) => () => ({
-        arbitrary: from.arbitrary.map((args) => new self2(args)),
-        terminal: from.terminal?.map((args) => new self2(args))
-      }),
+      toEquivalence: ([from]) => from,
       toFormatter: ([from]) => (t) => `${self2.identifier}(${from(t)})`,
       [SENTINELS_ANNOTATION_KEY]: collectSentinels(from.ast),
       ...annotations
@@ -6257,7 +6585,7 @@ var TaggedError3 = (identifier) => {
 function toEquivalence2(schema) {
   return toEquivalence(schema.ast);
 }
-var Json2 = /* @__PURE__ */ make9(/* @__PURE__ */ annotate(Json, {
+var Json2 = /* @__PURE__ */ make8(/* @__PURE__ */ annotate(Json, {
   toCode: () => ({
     runtime: "Schema.Json",
     Type: "Schema.Json"
@@ -6266,13 +6594,14 @@ var Json2 = /* @__PURE__ */ make9(/* @__PURE__ */ annotate(Json, {
 // node_modules/@opencode/schema/dist/schema.js
 var PositiveInt = Int.check(isGreaterThan3(0));
 var NonNegativeInt = Int.check(isGreaterThanOrEqualTo3(0));
-var RelativePath = String5.pipe(brand2("RelativePath"));
-var AbsolutePath = String5.pipe(brand2("AbsolutePath"));
+var RelativePath = String5.pipe(brand("RelativePath"), annotate2({ identifier: "RelativePath" }));
+var AbsolutePath = String5.pipe(brand("AbsolutePath"), annotate2({ identifier: "AbsolutePath" }));
 var optional3 = (schema) => optionalKey2(schema).pipe(decodeTo2(optional2(toType2(schema)), {
   decode: passthrough({ strict: false }),
   encode: transformOptional(filter((value) => value !== undefined))
 }));
-var statics = (methods) => (schema) => Object.assign(schema, methods(schema));
+var withStatics = (schema, methods) => Object.defineProperties(schema, Object.getOwnPropertyDescriptors(methods));
+var statics = (methods) => (schema) => withStatics(schema, methods(schema));
 var DateTimeUtcFromMillis = Finite.pipe(decodeTo2(DateTimeUtc, {
   decode: transform((value) => makeUnsafe3(value)),
   encode: transform((value) => toEpochMillis2(value))
@@ -6302,10 +6631,10 @@ function create(descending, timestamp = Date.now()) {
   return time + Array.from(bytes, (byte) => chars[byte % 62]).join("");
 }
 // node_modules/@opencode/schema/dist/project-id.js
-var ProjectID = String5.pipe(brand2("Project.ID"), statics((schema) => ({ global: schema.make("global") })));
+var ProjectID = String5.pipe(brand("Project.ID"), annotate2({ identifier: "Project.ID" }), statics((schema) => ({ global: schema.make("global") })));
 
 // node_modules/@opencode/schema/dist/workspace-id.js
-var WorkspaceID = String5.check(isStartsWith("wrk")).pipe(brand2("Workspace.ID"), statics((schema) => {
+var WorkspaceID = String5.check(isStartingWith("wrk")).pipe(brand("Workspace.ID"), annotate2({ identifier: "Workspace.ID" }), statics((schema) => {
   const create = () => schema.make("wrk_" + ascending());
   return {
     ascending: (id) => {
@@ -6320,11 +6649,11 @@ var WorkspaceID = String5.check(isStartsWith("wrk")).pipe(brand2("Workspace.ID")
 }));
 
 // node_modules/@opencode/schema/dist/location.js
-var Ref2 = Struct({
+var Ref = Struct({
   directory: AbsolutePath,
   workspaceID: optional3(WorkspaceID)
 }).annotate({ identifier: "Location.Ref" });
-var PublicRef = Struct(omit(Ref2.fields, ["workspaceID"])).annotate({
+var PublicRef = Struct(omit(Ref.fields, ["workspaceID"])).annotate({
   identifier: "Location.PublicRef"
 });
 
@@ -6343,9 +6672,9 @@ var PublicInfo = Struct(omit(Info.fields, ["workspaceID"])).annotate({
 });
 
 // node_modules/@opencode/schema/dist/event.js
-var ID = String5.check(isStartsWith("evt_")).pipe(brand2("Event.ID"), statics((schema) => ({ create: () => schema.make("evt_" + ascending()) })));
-var Seq = Int.check(isGreaterThanOrEqualTo3(0)).pipe(brand2("Event.Seq"));
-var Version = Int.check(isGreaterThanOrEqualTo3(1)).pipe(brand2("Event.Version"));
+var ID = String5.check(isStartingWith("evt_")).pipe(brand("Event.ID"), annotate2({ identifier: "Event.ID" }), statics((schema) => ({ create: () => schema.make("evt_" + ascending()) })));
+var Seq = Int.check(isGreaterThanOrEqualTo3(0)).pipe(brand("Event.Seq"), annotate2({ identifier: "Event.Seq" }));
+var Version = Int.check(isGreaterThanOrEqualTo3(1)).pipe(brand("Event.Version"), annotate2({ identifier: "Event.Version" }));
 var DurableEnvelope = Struct({ aggregateID: String5, seq: Seq, version: Version });
 function durable(input) {
   const data = Struct(input.schema);
@@ -6363,7 +6692,7 @@ function durable(input) {
     metadata: optional3(Record(String5, Unknown2)),
     type: Literal2(input.type),
     durable,
-    location: optional3(Ref2),
+    location: optional3(Ref),
     data
   }).annotate({ identifier: input.identifier ?? input.type }).pipe(statics(() => ({
     type: input.type,
@@ -6379,7 +6708,7 @@ function ephemeral(input) {
     created: Finite,
     metadata: optional3(Record(String5, Unknown2)),
     type: Literal2(input.type),
-    location: optional3(Ref2),
+    location: optional3(Ref),
     data
   }).annotate({ identifier: input.identifier ?? input.type }).pipe(statics(() => ({
     type: input.type,
@@ -6392,10 +6721,10 @@ function inventory(...definitions) {
   return Object.freeze(definitions);
 }
 // node_modules/@opencode/schema/dist/integration-id.js
-var IntegrationID = String5.pipe(brand2("Integration.ID"));
-var IntegrationMethodID = String5.pipe(brand2("Integration.MethodID"));
+var IntegrationID = String5.pipe(brand("Integration.ID"), annotate2({ identifier: "Integration.ID" }));
+var IntegrationMethodID = String5.pipe(brand("Integration.MethodID"), annotate2({ identifier: "Integration.MethodID" }));
 // node_modules/@opencode/schema/dist/form.js
-var IDSchema = String5.check(isStartsWith("frm_")).pipe(brand2("Form.ID"));
+var IDSchema = String5.check(isStartingWith("frm_")).pipe(brand("Form.ID"), annotate2({ identifier: "Form.ID" }));
 var ID2 = IDSchema.pipe(statics((schema) => ({ create: (id) => schema.make(id ?? "frm_" + ascending()) })));
 var Metadata = Record(String5, Unknown2).annotate({ identifier: "Form.Metadata" });
 var Option = Struct({
@@ -6406,14 +6735,14 @@ var Option = Struct({
 var When = Struct({
   key: String5,
   op: Literals(["eq", "neq"]),
-  value: Union2([String5, Number5, Boolean3])
+  value: Union2([String5, Number5, Boolean2])
 }).annotate({ identifier: "Form.When" });
 var FieldBase = {
   key: String5,
   title: String5.pipe(optional3),
   description: String5.pipe(optional3),
-  required: Boolean3.pipe(optional3),
-  hidden: Boolean3.pipe(optional3).annotate({
+  required: Boolean2.pipe(optional3),
+  hidden: Boolean2.pipe(optional3).annotate({
     description: "Skip the interactive authentication prompt and use the default unless an answer is supplied"
   }),
   when: ArraySchema(When).pipe(optional3)
@@ -6428,7 +6757,7 @@ var StringField = Struct({
   placeholder: String5.pipe(optional3),
   default: String5.pipe(optional3),
   options: ArraySchema(Option).pipe(optional3),
-  custom: Boolean3.pipe(optional3)
+  custom: Boolean2.pipe(optional3)
 }).annotate({ identifier: "Form.StringField" });
 var NumberField = Struct({
   ...FieldBase,
@@ -6447,7 +6776,7 @@ var IntegerField = Struct({
 var BooleanField = Struct({
   ...FieldBase,
   type: Literal2("boolean"),
-  default: Boolean3.pipe(optional3)
+  default: Boolean2.pipe(optional3)
 }).annotate({ identifier: "Form.BooleanField" });
 var MultiselectField = Struct({
   ...FieldBase,
@@ -6455,7 +6784,7 @@ var MultiselectField = Struct({
   options: ArraySchema(Option),
   minItems: NonNegativeInt.pipe(optional3),
   maxItems: NonNegativeInt.pipe(optional3),
-  custom: Boolean3.pipe(optional3),
+  custom: Boolean2.pipe(optional3),
   default: ArraySchema(String5).pipe(optional3)
 }).annotate({ identifier: "Form.MultiselectField" });
 var ExternalField = Struct({
@@ -6484,7 +6813,7 @@ var Info2 = Struct({
   ...InfoBase,
   fields: Fields
 }).annotate({ identifier: "Form.Info" });
-var Value = Union2([String5, Number5, Boolean3, ArraySchema(String5)]).annotate({
+var Value = Union2([String5, Number5, Boolean2, ArraySchema(String5)]).annotate({
   identifier: "Form.Value"
 });
 var Answer = Record(String5, Value).annotate({ identifier: "Form.Answer" });
@@ -6506,7 +6835,7 @@ var Cancelled = ephemeral({ type: "form.cancelled", schema: { id: ID2, sessionID
 var Event = { Created, Replied, Cancelled, Definitions: inventory(Created, Replied, Cancelled) };
 
 // node_modules/@opencode/schema/dist/credential.js
-var ID3 = String5.pipe(brand2("Credential.ID"), statics((schema) => ({ create: () => schema.make("cred_" + ascending()) })));
+var ID3 = String5.pipe(brand("Credential.ID"), annotate2({ identifier: "Credential.ID" }), statics((schema) => ({ create: () => schema.make("cred_" + ascending()) })));
 var Updated = ephemeral({
   type: "credential.updated",
   schema: {}
@@ -6544,7 +6873,7 @@ var Entry = Struct({
   id: ID3,
   integrationID: IntegrationID,
   label: String5,
-  active: Boolean3,
+  active: Boolean2,
   value: Value2
 }).annotate({ identifier: "Credential.Entry" });
 var CreateInput = Struct({
@@ -6552,7 +6881,7 @@ var CreateInput = Struct({
   integrationID: IntegrationID,
   label: optional3(String5),
   value: Value2,
-  activate: optional3(Boolean3)
+  activate: optional3(Boolean2)
 }).annotate({ identifier: "Credential.CreateInput" });
 
 // node_modules/@opencode/schema/dist/connection.js
@@ -6611,7 +6940,7 @@ var Updated2 = ephemeral({
   schema: {}
 });
 var Event3 = { Updated: Updated2, Definitions: inventory(Updated2) };
-var Ref3 = Struct({
+var Ref2 = Struct({
   id: ID4,
   name: String5,
   metadata: optional3(Record(String5, Any2))
@@ -6623,7 +6952,7 @@ var Info4 = Struct({
   methods: ArraySchema(Method),
   connections: ArraySchema(Info3)
 }).annotate({ identifier: "Integration.Info" });
-var AttemptID = String5.pipe(brand2("Integration.AttemptID"), statics((schema) => ({ create: () => schema.make("con_" + ascending()) })));
+var AttemptID = String5.pipe(brand("Integration.AttemptID"), annotate2({ identifier: "Integration.AttemptID" }), statics((schema) => ({ create: () => schema.make("con_" + ascending()) })));
 var AttemptTime = Struct({
   created: Number5,
   expires: Number5
@@ -6654,8 +6983,30 @@ var CommandAttemptStatus = Union2([
   Struct({ status: Literal2("expired"), time: AttemptTime })
 ]).pipe(toTaggedUnion("status")).annotate({ identifier: "Integration.CommandAttemptStatus" });
 
+// node_modules/@opencode/schema/dist/model-compatibility.js
+var ReasoningField = Union2([
+  Literals(["reasoning", "reasoning_content", "reasoning_text"]),
+  String5
+]).annotate({ identifier: "Model.ReasoningField" });
+var MaxTokensField = Literals(["max_completion_tokens", "max_tokens"]).annotate({
+  identifier: "Model.MaxTokensField"
+});
+var CacheFormat = Literals(["anthropic", "alibaba"]).annotate({ identifier: "Model.CacheFormat" });
+var Compatibility = Struct({
+  reasoningField: ReasoningField.pipe(optional3),
+  requireReasoning: Boolean2.pipe(optional3),
+  maxTokensField: MaxTokensField.pipe(optional3),
+  requireFinishReason: Boolean2.pipe(optional3),
+  requireAssistantAfterTool: Boolean2.pipe(optional3),
+  supportsPromptCacheKey: Boolean2.pipe(optional3),
+  cacheFormat: CacheFormat.pipe(optional3),
+  supportsThinkingBlockBinding: Boolean2.pipe(optional3),
+  supportsEffortUpdates: Boolean2.pipe(optional3)
+}).annotate({ identifier: "Model.Compatibility" });
+var ProviderCompatibility = Struct(omit(Compatibility.fields, ["supportsThinkingBlockBinding", "supportsEffortUpdates"])).annotate({ identifier: "Provider.Compatibility" });
+
 // node_modules/@opencode/schema/dist/provider.js
-var ID5 = String5.pipe(brand2("Provider.ID"), statics((schema) => ({
+var ID5 = String5.pipe(brand("Provider.ID"), annotate2({ identifier: "Provider.ID" }), statics((schema) => ({
   opencode: schema.make("opencode"),
   anthropic: schema.make("anthropic"),
   openai: schema.make("openai"),
@@ -6677,19 +7028,21 @@ var Compaction = Union2([
   Struct({ type: Literal2("native") })
 ]).pipe(toTaggedUnion("type")).annotate({ identifier: "Provider.Compaction" });
 var Transport = Literals(["http", "websocket"]).annotate({ identifier: "Provider.Transport" });
+var Encoding2 = Literals(["zstd", "gzip", "none"]).annotate({ identifier: "Provider.Encoding" });
 var Settings = StructWithRest(Struct({
   timeout: Union2([Finite, Literal2(false)]).pipe(optional3),
   headerTimeout: Union2([Finite, Literal2(false)]).pipe(optional3),
   chunkTimeout: Union2([Finite, Literal2(false)]).pipe(optional3),
   compaction: Compaction.pipe(optional3),
-  transport: Transport.pipe(optional3)
+  transport: Transport.pipe(optional3),
+  encoding: Encoding2.pipe(optional3)
 }), [Record(String5, Any2)]).annotate({ identifier: "Provider.Settings" });
 var Overlays = {
   settings: Settings.pipe(optional3),
   headers: Record(String5, String5).pipe(optional3),
   body: Record(String5, Any2).pipe(optional3)
 };
-var Request3 = Struct({
+var Request2 = Struct({
   settings: Settings.pipe(withConstructorDefault2(succeed5({}))),
   headers: Record(String5, String5),
   body: Record(String5, Any2)
@@ -6701,20 +7054,21 @@ var Info5 = Struct({
   name: String5,
   activation: Activation,
   package: Package,
+  compatibility: ProviderCompatibility.pipe(optional3),
   ...Overlays
 }).annotate({ identifier: "Provider.Info" }).pipe(statics(() => ({
   empty: (id) => ({ id, name: id, activation: "auto", package: "" })
 })));
 // node_modules/@opencode/schema/dist/money.js
-var USD = Finite.pipe(brand2("Money.USD"), annotate2({ identifier: "Money.USD" }), statics((schema) => ({ zero: schema.make(0) })));
-var USDPerMillionTokens = Finite.pipe(brand2("Money.USDPerMillionTokens"), annotate2({ identifier: "Money.USDPerMillionTokens" }), statics((schema) => ({ zero: schema.make(0) })));
+var USD = Finite.pipe(brand("Money.USD"), annotate2({ identifier: "Money.USD" }), statics((schema) => ({ zero: schema.make(0) })));
+var USDPerMillionTokens = Finite.pipe(brand("Money.USDPerMillionTokens"), annotate2({ identifier: "Money.USDPerMillionTokens" }), statics((schema) => ({ zero: schema.make(0) })));
 
 // node_modules/@opencode/schema/dist/model.js
-var ID6 = String5.pipe(brand2("Model.ID"));
+var ID6 = String5.pipe(brand("Model.ID"));
 var Updated4 = ephemeral({ type: "model.updated", schema: {} });
 var Event5 = { Updated: Updated4, Definitions: inventory(Updated4) };
-var VariantID = String5.pipe(brand2("Model.VariantID"));
-var Ref4 = Struct({
+var VariantID = String5.pipe(brand("Model.VariantID"));
+var Ref3 = Struct({
   id: ID6,
   providerID: ID5,
   variant: VariantID.pipe(optional3)
@@ -6736,34 +7090,18 @@ var Ref4 = Struct({
     });
   }
 })));
-var Family = String5.pipe(brand2("Model.Family"));
-var ReasoningField = Union2([
-  Literals(["reasoning", "reasoning_content", "reasoning_text"]),
-  String5
-]).annotate({ identifier: "Model.ReasoningField" });
-var MaxTokensField = Literals(["max_completion_tokens", "max_tokens"]).annotate({
-  identifier: "Model.MaxTokensField"
-});
+var Family = String5.pipe(brand("Model.Family"));
 var Settings2 = StructWithRest(Struct({
-  compaction: Compaction.pipe(optional3)
+  compaction: Compaction.pipe(optional3),
+  encoding: Encoding2.pipe(optional3)
 }), [Record(String5, Any2)]).annotate({ identifier: "Model.Settings" });
 var Overlays2 = {
   settings: Settings2.pipe(optional3),
   headers: Record(String5, String5).pipe(optional3),
   body: Record(String5, Any2).pipe(optional3)
 };
-var Compatibility = Struct({
-  reasoningField: ReasoningField.pipe(optional3),
-  requireReasoning: Boolean3.pipe(optional3),
-  maxTokensField: MaxTokensField.pipe(optional3),
-  requireFinishReason: Boolean3.pipe(optional3),
-  requireAssistantAfterTool: Boolean3.pipe(optional3),
-  supportsPromptCacheKey: Boolean3.pipe(optional3),
-  supportsThinkingBlockBinding: Boolean3.pipe(optional3),
-  supportsEffortUpdates: Boolean3.pipe(optional3)
-}).annotate({ identifier: "Model.Compatibility" });
 var Capabilities = Struct({
-  tools: Boolean3,
+  tools: Boolean2,
   input: ArraySchema(String5),
   output: ArraySchema(String5)
 }).annotate({ identifier: "Model.Capabilities" }).pipe(statics(() => ({
@@ -6802,7 +7140,7 @@ var Info6 = Struct({
   }),
   cost: ArraySchema(Cost),
   status: Literals(["alpha", "beta", "deprecated", "active"]),
-  enabled: Boolean3,
+  enabled: Boolean2,
   limit: Struct({
     context: Int,
     input: Int.pipe(optional3),
@@ -6824,7 +7162,7 @@ var Info6 = Struct({
   })
 })));
 // node_modules/@opencode/schema/dist/session-id.js
-var SessionID = String5.check(isStartsWith("ses")).pipe(brand2("SessionID"), statics((schema) => {
+var SessionID = String5.check(isStartingWith("ses")).pipe(brand("SessionID"), annotate2({ identifier: "Session.ID" }), statics((schema) => {
   const create = () => schema.make("ses_" + descending());
   return {
     create,
@@ -6833,7 +7171,7 @@ var SessionID = String5.check(isStartsWith("ses")).pipe(brand2("SessionID"), sta
 }));
 
 // node_modules/@opencode/schema/dist/permission.js
-var ID7 = String5.check(isStartsWith("per")).pipe(brand2("Permission.ID"), statics((schema) => ({ create: (id) => schema.make(id ?? "per_" + ascending()) })));
+var ID7 = String5.check(isStartingWith("per")).pipe(brand("Permission.ID"), annotate2({ identifier: "Permission.ID" }), statics((schema) => ({ create: (id) => schema.make(id ?? "per_" + ascending()) })));
 var Source = Union2([
   Struct({
     type: Literal2("tool"),
@@ -6850,12 +7188,12 @@ var RequestFields = {
   source: Source.pipe(optional3),
   message: String5.pipe(optional3)
 };
-var Request4 = Struct({
+var Request3 = Struct({
   id: ID7,
   ...RequestFields
 }).annotate({ identifier: "Permission.Request" });
 var Reply2 = Literals(["once", "always", "reject"]).annotate({ identifier: "Permission.Reply" });
-var Asked = ephemeral({ type: "permission.asked", schema: Request4.fields });
+var Asked = ephemeral({ type: "permission.asked", schema: Request3.fields });
 var Replied2 = ephemeral({
   type: "permission.replied",
   schema: {
@@ -6875,18 +7213,18 @@ var Ruleset = ArraySchema(Rule).annotate({ identifier: "Permission.Ruleset" });
 
 // node_modules/@opencode/schema/dist/agent.js
 var Updated5 = ephemeral({ type: "agent.updated", schema: {} });
-var ID8 = String5.pipe(brand2("Agent.ID"));
-var Name = String5.pipe(brand2("Agent.Name"));
+var ID8 = String5.pipe(brand("Agent.ID"), annotate2({ identifier: "Agent.ID" }));
+var Name = String5.pipe(brand("Agent.Name"));
 var Color = String5.annotate({ identifier: "Agent.Color" });
 var Info7 = Struct({
   id: ID8,
   name: Name,
-  model: Ref4.pipe(optional3),
-  request: Request3,
+  model: Ref3.pipe(optional3),
+  request: Request2,
   system: String5.pipe(optional3),
   description: String5.pipe(optional3),
   mode: Literals(["subagent", "primary", "all"]),
-  hidden: Boolean3,
+  hidden: Boolean2,
   color: Color.pipe(optional3),
   steps: PositiveInt.pipe(optional3),
   permissions: Ruleset
@@ -6944,8 +7282,8 @@ class LocalConfig extends Class3("Mcp.LocalConfig")({
     description: "Working directory for the MCP server process. Relative paths resolve from the workspace directory."
   }),
   environment: Record(String5, String5).pipe(optional3),
-  disabled: Boolean3.pipe(optional3),
-  codemode: Boolean3.pipe(optional3).annotate({
+  disabled: Boolean2.pipe(optional3),
+  codemode: Boolean2.pipe(optional3).annotate({
     description: "Expose this server's tools through Code Mode. Defaults to true."
   }),
   timeout: TimeoutConfig.pipe(optional3),
@@ -6957,7 +7295,7 @@ class OAuthConfig extends Class3("Mcp.OAuthConfig")({
   client_id: String5.pipe(optional3),
   client_secret: String5.pipe(optional3),
   scope: String5.pipe(optional3),
-  callback_port: Int.check(isBetween2({ minimum: 1, maximum: 65535 })).pipe(optional3),
+  callback_port: Int.check(isBetween({ minimum: 1, maximum: 65535 })).pipe(optional3),
   redirect_uri: String5.pipe(optional3),
   auth_server_metadata_url: String5.pipe(optional3).annotate({
     description: "URL of the OAuth or OpenID Connect authorization server metadata document. Set when the MCP server does not publish protected resource metadata that names its authorization server."
@@ -6970,8 +7308,8 @@ class RemoteConfig extends Class3("Mcp.RemoteConfig")({
   url: String5,
   headers: Record(String5, String5).pipe(optional3),
   oauth: Union2([OAuthConfig, Literal2(false)]).pipe(optional3),
-  disabled: Boolean3.pipe(optional3),
-  codemode: Boolean3.pipe(optional3).annotate({
+  disabled: Boolean2.pipe(optional3),
+  codemode: Boolean2.pipe(optional3).annotate({
     description: "Expose this server's tools through Code Mode. Defaults to true."
   }),
   timeout: TimeoutConfig.pipe(optional3),
@@ -7000,7 +7338,7 @@ var Server = Struct({
   status: Status2,
   integrationID: optional3(IntegrationID)
 }).annotate({ identifier: "Mcp.Server" });
-var Resource2 = Struct({
+var Resource = Struct({
   server: String5,
   name: String5,
   uri: String5,
@@ -7015,7 +7353,7 @@ var ResourceTemplate = Struct({
   mimeType: optional3(String5)
 }).annotate({ identifier: "Mcp.ResourceTemplate" });
 var ResourceCatalog = Struct({
-  resources: ArraySchema(Resource2),
+  resources: ArraySchema(Resource),
   templates: ArraySchema(ResourceTemplate)
 }).annotate({ identifier: "Mcp.ResourceCatalog" });
 var ResourceContentPart = Union2([
@@ -7038,7 +7376,7 @@ var ResourceContent = Struct({
   contents: ArraySchema(ResourceContentPart)
 }).annotate({ identifier: "Mcp.ResourceContent" });
 // node_modules/@opencode/schema/dist/pty.js
-var IDSchema2 = String5.check(isStartsWith("pty")).pipe(brand2("PtyID"));
+var IDSchema2 = String5.check(isStartingWith("pty")).pipe(brand("PtyID"), annotate2({ identifier: "Pty.ID" }));
 var ID9 = IDSchema2.pipe(statics((schema) => {
   const create = () => schema.make("pty_" + ascending());
   return {
@@ -7077,7 +7415,7 @@ var UpdateInput = Struct({
 });
 // node_modules/@opencode/schema/dist/project.js
 var ID10 = ProjectID;
-var Vcs = String5.check(isPattern2(/^[a-z][a-z0-9._-]*$/)).annotate({
+var Vcs = String5.check(isPattern2(/^[a-z][a-z0-9._-]*$/u)).annotate({
   identifier: "Project.Vcs"
 });
 var Current = Struct({
@@ -7096,7 +7434,8 @@ var Commands = Struct({
 var Time = Struct({
   created: NonNegativeInt,
   updated: NonNegativeInt,
-  active: NonNegativeInt
+  active: NonNegativeInt,
+  archived: optional3(NonNegativeInt)
 }).annotate({ identifier: "Project.Time" });
 var Info10 = Struct({
   id: ID10,
@@ -7120,7 +7459,7 @@ var Event10 = { Updated: Updated8, Definitions: inventory(Updated8) };
 // node_modules/@opencode/schema/dist/llm.js
 var FinishReason = Literals(["stop", "length", "tool-calls", "content-filter", "error", "unknown"]);
 // node_modules/@opencode/schema/dist/tool.js
-var CallID = String5.pipe(brand2("Tool.CallID"));
+var CallID = String5.pipe(brand("Tool.CallID"));
 
 class Error4 extends TaggedError3()("Tool.Error", {
   message: String5,
@@ -7159,8 +7498,8 @@ var Info11 = Struct({
   messages: Json2
 }).annotate({ identifier: "Session.ProviderContext" });
 // node_modules/@opencode/schema/dist/skill.js
-var ID11 = String5.pipe(brand2("Skill.ID"));
-var Name2 = String5.pipe(brand2("Skill.Name"));
+var ID11 = String5.pipe(brand("Skill.ID"), annotate2({ identifier: "Skill.ID" }));
+var Name2 = String5.pipe(brand("Skill.Name"), annotate2({ identifier: "Skill.Name" }));
 var DirectorySource = Struct({
   type: tag("directory"),
   path: AbsolutePath
@@ -7173,7 +7512,7 @@ var Info12 = Struct({
   id: ID11,
   name: Name2,
   description: String5.pipe(optional3),
-  autoinvoke: Boolean3.pipe(optional3),
+  autoinvoke: Boolean2.pipe(optional3),
   path: AbsolutePath,
   content: String5
 }).annotate({ identifier: "Skill.Info" });
@@ -7181,7 +7520,7 @@ var Updated9 = ephemeral({ type: "skill.updated", schema: {} });
 var Event11 = { Updated: Updated9, Definitions: inventory(Updated9) };
 var EmbeddedSource = Struct({
   type: tag("embedded"),
-  skill: suspend2(() => Info12)
+  skill: suspend3(() => Info12)
 }).annotate({ identifier: "Skill.EmbeddedSource" });
 var Source2 = Object.assign(Union2([DirectorySource, UrlSource, EmbeddedSource]).pipe(toTaggedUnion("type"), annotate2({ identifier: "Skill.Source" })), {
   equals: (a, b) => {
@@ -7208,7 +7547,7 @@ var FileSource = Union2([
   Struct({ type: Literal2("inline") }),
   Struct({ type: Literal2("uri"), uri: String5 })
 ]).pipe(toTaggedUnion("type")).annotate({ identifier: "Prompt.FileSource" });
-var Base64 = String5.check(isPattern2(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/)).annotate({ identifier: "Prompt.Base64" });
+var Base64 = String5.check(isPattern2(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u)).annotate({ identifier: "Prompt.Base64" });
 var FileAttachment = Struct({
   data: Base64,
   mime: String5,
@@ -7251,7 +7590,7 @@ var Prompt = Struct({
   })
 })));
 // node_modules/@opencode/schema/dist/shell.js
-var IDSchema3 = String5.check(isStartsWith("sh_")).pipe(brand2("Shell.ID"));
+var IDSchema3 = String5.check(isStartingWith("sh_")).pipe(brand("Shell.ID"), annotate2({ identifier: "Shell.ID" }));
 var ID12 = IDSchema3.pipe(statics((schema) => {
   const create = () => schema.make("sh_" + ascending());
   return {
@@ -7298,17 +7637,17 @@ var Output = Struct({
   output: String5,
   cursor: NonNegativeInt,
   size: NonNegativeInt,
-  truncated: Boolean3
+  truncated: Boolean2
 });
 // node_modules/@opencode/schema/dist/session-error.js
 var Error5 = Struct({
   type: String5,
   message: String5,
-  status: Int.check(isBetween2({ minimum: 100, maximum: 599 })).pipe(optional3),
+  status: Int.check(isBetween({ minimum: 100, maximum: 599 })).pipe(optional3),
   response: Struct({ body: String5 }).pipe(optional3)
 }).annotate({ identifier: "Session.StructuredError" });
 // node_modules/@opencode/schema/dist/snapshot.js
-var ID13 = String5.pipe(brand2("Snapshot.ID"));
+var ID13 = String5.pipe(brand("Snapshot.ID"), annotate2({ identifier: "Snapshot.ID" }));
 // node_modules/@opencode/schema/dist/token-usage.js
 var Info14 = Struct({
   input: Finite,
@@ -7321,11 +7660,11 @@ var Info14 = Struct({
 }).annotate({ identifier: "TokenUsage.Info" });
 
 // node_modules/@opencode/schema/dist/session-message.js
-var ID14 = String5.check(isStartsWith("msg_")).pipe(brand2("Session.Message.ID"), statics((schema) => ({
+var ID14 = String5.check(isStartingWith("msg_")).pipe(brand("Session.Message.ID"), annotate2({ identifier: "Session.Message.ID" }), statics((schema) => ({
   create: () => schema.make("msg_" + ascending()),
   fromEvent: (eventID) => schema.make(eventID.replace(/^evt_/, "msg_"))
 })));
-var Base3 = {
+var Base = {
   id: ID14,
   metadata: Record(String5, Unknown2).pipe(optional3),
   time: Struct({ created: DateTimeUtcFromMillis })
@@ -7334,31 +7673,31 @@ var ProviderState = Record(String5, Unknown2).annotate({
   identifier: "Session.Message.ProviderState"
 });
 var AgentSelected = Struct({
-  ...Base3,
+  ...Base,
   type: tag("agent-switched"),
   agent: ID8,
   previous: ID8.pipe(optional3)
 }).annotate({ identifier: "Session.Message.AgentSelected" });
 var ModelSelected = Struct({
-  ...Base3,
+  ...Base,
   type: tag("model-switched"),
-  model: Ref4,
-  previous: Ref4.pipe(optional3)
+  model: Ref3,
+  previous: Ref3.pipe(optional3)
 }).annotate({ identifier: "Session.Message.ModelSelected" });
 var LocationSwitched = Struct({
-  ...Base3,
+  ...Base,
   type: tag("location-switched"),
-  location: Ref2,
+  location: Ref,
   projectID: ID10.pipe(optional3),
   subpath: RelativePath.pipe(optional3),
   previous: Struct({
-    location: Ref2,
+    location: Ref,
     projectID: ID10.pipe(optional3),
     subpath: RelativePath.pipe(optional3)
   }).pipe(optional3)
 }).annotate({ identifier: "Session.Message.LocationSwitched" });
 var User = Struct({
-  ...Base3,
+  ...Base,
   text: Prompt.fields.text,
   files: Prompt.fields.files,
   agents: Prompt.fields.agents,
@@ -7366,26 +7705,26 @@ var User = Struct({
   type: tag("user")
 }).annotate({ identifier: "Session.Message.User" });
 var Synthetic = Struct({
-  ...Base3,
+  ...Base,
   text: String5,
   description: String5.pipe(optional3),
   type: tag("synthetic")
 }).annotate({ identifier: "Session.Message.Synthetic" });
 var System = Struct({
-  ...Base3,
+  ...Base,
   type: tag("system"),
   text: String5,
   description: String5.pipe(optional3)
 }).annotate({ identifier: "Session.Message.System" });
 var Skill = Struct({
-  ...Base3,
+  ...Base,
   type: tag("skill"),
   skill: ID11,
   name: Name2,
   text: String5
 }).annotate({ identifier: "Session.Message.Skill" });
 var Shell = Struct({
-  ...Base3,
+  ...Base,
   type: tag("shell"),
   shellID: ID12,
   command: String5,
@@ -7424,7 +7763,7 @@ var AssistantTool = Struct({
   type: tag("tool"),
   id: String5,
   name: String5,
-  executed: Boolean3.pipe(optional3),
+  executed: Boolean2.pipe(optional3),
   providerState: ProviderState.pipe(optional3),
   providerResultState: ProviderState.pipe(optional3),
   state: ToolState,
@@ -7458,10 +7797,10 @@ var AssistantRetry = Struct({
   error: Error5
 }).annotate({ identifier: "Session.Message.Assistant.Retry" });
 var Assistant = Struct({
-  ...Base3,
+  ...Base,
   type: tag("assistant"),
   agent: ID8,
-  model: Ref4,
+  model: Ref3,
   content: AssistantContent.pipe(ArraySchema),
   snapshot: Struct({
     start: ID13.pipe(optional3),
@@ -7481,7 +7820,7 @@ var Assistant = Struct({
     completed: DateTimeUtcFromMillis.pipe(optional3)
   })
 }).annotate({ identifier: "Session.Message.Assistant" });
-var CompactionBase = { type: tag("compaction"), ...Base3 };
+var CompactionBase = { type: tag("compaction"), ...Base };
 var CompactionUsage = {
   cost: USD.pipe(optional3),
   tokens: Info14.pipe(optional3)
@@ -7497,7 +7836,7 @@ var CompactionCompleted = Struct({
   ...CompactionBase,
   status: tag("completed"),
   reason: Literals(["auto", "manual"]),
-  model: Ref4.pipe(optional3),
+  model: Ref3.pipe(optional3),
   providerState: ProviderState.pipe(optional3),
   summary: String5,
   recent: String5,
@@ -7513,9 +7852,10 @@ var CompactionFailed = Struct({
 }).annotate({ identifier: "Session.Message.Compaction.Failed" });
 var Compaction2 = Union2([CompactionRunning, CompactionCompleted, CompactionFailed]).pipe(toTaggedUnion("status"), annotate2({ identifier: "Session.Message.Compaction" }));
 var Idle = Struct({
-  ...Base3,
+  ...Base,
   type: tag("idle"),
-  outcome: Literals(["succeeded", "failed", "interrupted"])
+  outcome: Literals(["succeeded", "failed", "interrupted"]),
+  error: Error5.pipe(optional3)
 }).annotate({ identifier: "Session.Message.Idle" });
 var Info15 = Union2([
   AgentSelected,
@@ -7604,14 +7944,14 @@ var PersistedRevert = Union2([PersistedCurrent, PersistedLegacy]).pipe(toTaggedU
   })
 })), annotate2({ identifier: "Session.Revert.Persisted" }));
 // node_modules/@opencode/schema/dist/instruction.js
-var Key2 = String5.check(isPattern2(/^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._/-]*$/)).pipe(brand2("Instruction.Key"));
-var Hash2 = String5.check(isPattern2(/^[a-f0-9]{64}$/)).pipe(brand2("Instruction.Hash"));
-var Values = Record(Key2, Hash2);
+var Key2 = String5.check(isPattern2(/^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._/-]*$/u)).pipe(brand("Instruction.Key"), annotate2({ identifier: "Instruction.Key" }));
+var Hash = String5.check(isPattern2(/^[a-f0-9]{64}$/u)).pipe(brand("Instruction.Hash"), annotate2({ identifier: "Instruction.Hash" }));
+var Values = Record(Key2, Hash);
 var Removed = Literal2("removed");
 var removed = Removed.make("removed");
-var Delta = Record(String5, Union2([Hash2, Removed]));
+var Delta = Record(String5, Union2([Hash, Removed]));
 // node_modules/@opencode/schema/dist/instruction-entry.js
-var Key3 = String5.check(isPattern2(/^[a-z0-9][a-z0-9._-]*$/)).annotate({
+var Key3 = String5.check(isPattern2(/^[a-z0-9][a-z0-9._-]*$/u)).annotate({
   identifier: "InstructionEntry.Key",
   description: "Instruction entry key (lowercase alphanumerics plus . _ -)"
 });
@@ -7621,7 +7961,7 @@ var Info17 = Struct({
 }).annotate({ identifier: "InstructionEntry.Info" });
 var Snapshot = ArraySchema(Struct({
   ...Info17.fields,
-  removed: Boolean3
+  removed: Boolean2
 })).annotate({ identifier: "InstructionEntry.Snapshot" });
 var MaxValueBytes = 256 * 1024;
 
@@ -7644,7 +7984,7 @@ var SyntheticPayload = Struct({
 }).annotate({ identifier: "Session.Inbox.SyntheticPayload" });
 var CompactionPayload = Struct({}).annotate({ identifier: "Session.Inbox.CompactionPayload" });
 var MovePayload = Struct({
-  location: Ref2,
+  location: Ref,
   projectID: ID10,
   subpath: RelativePath.pipe(optional3)
 }).annotate({ identifier: "Session.Inbox.MovePayload" });
@@ -7685,7 +8025,7 @@ var Source3 = Struct({
 }).annotate({
   identifier: "Session.Event.Source"
 });
-var Base4 = {
+var Base2 = {
   sessionID: SessionID
 };
 var options = {
@@ -7698,15 +8038,15 @@ var Created4 = durable({
   type: "session.created",
   ...options,
   schema: {
-    ...Base4,
+    ...Base2,
     projectID: ID10,
-    location: Ref2,
+    location: Ref,
     subpath: RelativePath.pipe(optional3),
     parentID: SessionID.pipe(optional3),
     slug: String5,
     title: String5.pipe(optional3),
     agent: ID8.pipe(optional3),
-    model: Ref4.pipe(optional3),
+    model: Ref3.pipe(optional3),
     metadata: SessionMetadata.pipe(optional3),
     permissions: Ruleset.pipe(optional3),
     version: String5
@@ -7716,7 +8056,7 @@ var AgentSelected2 = durable({
   type: "session.agent.selected",
   ...options,
   schema: {
-    ...Base4,
+    ...Base2,
     agent: ID8,
     previous: ID8.pipe(optional3)
   }
@@ -7725,16 +8065,16 @@ var ModelSelected2 = durable({
   type: "session.model.selected",
   ...options,
   schema: {
-    ...Base4,
-    model: Ref4,
-    previous: Ref4.pipe(optional3)
+    ...Base2,
+    model: Ref3,
+    previous: Ref3.pipe(optional3)
   }
 });
 var Moved = durable({
   type: "session.moved",
   ...options,
   schema: {
-    ...Base4,
+    ...Base2,
     ...MovePayload.fields
   }
 });
@@ -7742,7 +8082,7 @@ var Renamed = durable({
   type: "session.renamed",
   ...options,
   schema: {
-    ...Base4,
+    ...Base2,
     title: String5
   }
 });
@@ -7750,7 +8090,7 @@ var MetadataUpdated = durable({
   type: "session.metadata.updated",
   ...options,
   schema: {
-    ...Base4,
+    ...Base2,
     metadata: SessionMetadata
   }
 });
@@ -7758,7 +8098,7 @@ var Permissions = durable({
   type: "session.permissions",
   ...options,
   schema: {
-    ...Base4,
+    ...Base2,
     permissions: Ruleset
   }
 });
@@ -7766,7 +8106,7 @@ var Viewed = durable({
   type: "session.viewed",
   ...options,
   schema: {
-    ...Base4,
+    ...Base2,
     idle: Finite
   }
 });
@@ -7774,7 +8114,7 @@ var MessageContentUpdated = durable({
   type: "session.message.content.updated",
   ...options,
   schema: {
-    ...Base4,
+    ...Base2,
     messageID: ID14,
     content: ArraySchema(AssistantContentEncoded)
   }
@@ -7783,7 +8123,7 @@ var UsageRecorded = durable({
   type: "session.usage.recorded",
   ...options,
   schema: {
-    ...Base4,
+    ...Base2,
     source: Literals(["title", "compaction"]),
     cost: USD,
     tokens: Info14
@@ -7792,7 +8132,7 @@ var UsageRecorded = durable({
 var UsageUpdated = ephemeral({
   type: "session.usage.updated",
   schema: {
-    ...Base4,
+    ...Base2,
     cost: USD,
     tokens: Info14
   }
@@ -7803,7 +8143,7 @@ var Deleted3 = durable({
     aggregate: "sessionID",
     version: 2
   },
-  schema: Base4
+  schema: Base2
 });
 var Forked = durable({
   type: "session.forked",
@@ -7812,7 +8152,7 @@ var Forked = durable({
     version: 2
   },
   schema: {
-    ...Base4,
+    ...Base2,
     parentID: SessionID,
     boundary: Boundary,
     instructions: Values.pipe(optional3),
@@ -7820,7 +8160,7 @@ var Forked = durable({
   }
 });
 var InboxRef = {
-  ...Base4,
+  ...Base2,
   inboxID: ID14
 };
 var InboxDelivered = durable({
@@ -7848,17 +8188,17 @@ var InboxDeliveryChanged = durable({
 });
 var Execution;
 (function(Execution) {
-  Execution.Started = durable({ type: "session.execution.started", ...options, schema: Base4 });
-  Execution.Succeeded = durable({ type: "session.execution.succeeded", ...options, schema: Base4 });
+  Execution.Started = durable({ type: "session.execution.started", ...options, schema: Base2 });
+  Execution.Succeeded = durable({ type: "session.execution.succeeded", ...options, schema: Base2 });
   Execution.Failed = durable({
     type: "session.execution.failed",
     ...options,
-    schema: { ...Base4, error: Error5 }
+    schema: { ...Base2, error: Error5 }
   });
   Execution.Interrupted = durable({
     type: "session.execution.interrupted",
     ...options,
-    schema: { ...Base4, reason: Literals(["user", "shutdown", "superseded", "inactivity"]) }
+    schema: { ...Base2, reason: Literals(["user", "shutdown", "superseded", "inactivity"]) }
   });
 })(Execution || (Execution = {}));
 var InstructionsUpdated = durable({
@@ -7868,7 +8208,7 @@ var InstructionsUpdated = durable({
     version: 2
   },
   schema: {
-    ...Base4,
+    ...Base2,
     delta: Delta,
     text: String5.pipe(optional3)
   }
@@ -7877,7 +8217,7 @@ var Synthetic3 = durable({
   type: "session.synthetic",
   ...options,
   schema: {
-    ...Base4,
+    ...Base2,
     text: String5,
     description: String5.pipe(optional3),
     metadata: Record(String5, Unknown2).pipe(optional3)
@@ -7889,7 +8229,7 @@ var Skill2;
     type: "session.skill.activated",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       id: ID11,
       name: Name2,
       text: String5
@@ -7902,7 +8242,7 @@ var Shell2;
     type: "session.shell.started",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       shell: Info13
     }
   });
@@ -7910,7 +8250,7 @@ var Shell2;
     type: "session.shell.ended",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       shell: Info13,
       output: Output
     }
@@ -7922,10 +8262,10 @@ var Step;
     type: "session.step.started",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       assistantMessageID: ID14,
       agent: ID8,
-      model: Ref4,
+      model: Ref3,
       snapshot: ID13.pipe(optional3),
       started: NonNegativeInt
     }
@@ -7934,7 +8274,7 @@ var Step;
     type: "session.step.streamed",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       assistantMessageID: ID14
     }
   });
@@ -7942,7 +8282,7 @@ var Step;
     type: "session.step.ended",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       assistantMessageID: ID14,
       finish: FinishReason,
       rawFinish: String5.pipe(optional3),
@@ -7957,7 +8297,7 @@ var Step;
     type: "session.step.failed",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       assistantMessageID: ID14,
       error: Error5,
       finish: Literals(["content-filter"]).pipe(optional3),
@@ -7976,7 +8316,7 @@ var Text;
     type: "session.text.started",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       assistantMessageID: ID14,
       ordinal: NonNegativeInt
     }
@@ -7984,7 +8324,7 @@ var Text;
   Text.Delta = ephemeral({
     type: "session.text.delta",
     schema: {
-      ...Base4,
+      ...Base2,
       assistantMessageID: ID14,
       ordinal: NonNegativeInt,
       delta: String5
@@ -7994,7 +8334,7 @@ var Text;
     type: "session.text.ended",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       assistantMessageID: ID14,
       ordinal: NonNegativeInt,
       text: String5,
@@ -8008,7 +8348,7 @@ var Reasoning;
     type: "session.reasoning.started",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       assistantMessageID: ID14,
       ordinal: NonNegativeInt,
       state: ProviderState.pipe(optional3)
@@ -8017,7 +8357,7 @@ var Reasoning;
   Reasoning.Delta = ephemeral({
     type: "session.reasoning.delta",
     schema: {
-      ...Base4,
+      ...Base2,
       assistantMessageID: ID14,
       ordinal: NonNegativeInt,
       delta: String5
@@ -8027,7 +8367,7 @@ var Reasoning;
     type: "session.reasoning.ended",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       assistantMessageID: ID14,
       ordinal: NonNegativeInt,
       text: String5,
@@ -8038,7 +8378,7 @@ var Reasoning;
 var Tool;
 (function(Tool) {
   const ToolBase = {
-    ...Base4,
+    ...Base2,
     assistantMessageID: ID14,
     id: String5
   };
@@ -8074,7 +8414,7 @@ var Tool;
     schema: {
       ...ToolBase,
       input: Record(String5, Unknown2),
-      executed: Boolean3,
+      executed: Boolean2,
       state: ProviderState.pipe(optional3)
     }
   });
@@ -8095,7 +8435,7 @@ var Tool;
       ...ToolBase,
       content: NonEmptyArray(Content),
       metadata: Record(String5, Json2).pipe(optional3),
-      executed: Boolean3,
+      executed: Boolean2,
       resultState: ProviderState.pipe(optional3)
     }
   });
@@ -8110,7 +8450,7 @@ var Tool;
       error: Error5,
       content: NonEmptyArray(Content).pipe(optional3),
       metadata: Record(String5, Json2).pipe(optional3),
-      executed: Boolean3,
+      executed: Boolean2,
       resultState: ProviderState.pipe(optional3)
     }
   });
@@ -8119,7 +8459,7 @@ var RetryScheduled = durable({
   type: "session.retry.scheduled",
   ...options,
   schema: {
-    ...Base4,
+    ...Base2,
     assistantMessageID: ID14,
     attempt: PositiveInt,
     at: NonNegativeInt,
@@ -8132,7 +8472,7 @@ var Compaction4;
     type: "session.compaction.started",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       reason: Literals(["auto", "manual"]),
       recent: String5,
       inputID: ID14.pipe(optional3)
@@ -8141,7 +8481,7 @@ var Compaction4;
   Compaction.Delta = ephemeral({
     type: "session.compaction.delta",
     schema: {
-      ...Base4,
+      ...Base2,
       text: String5
     }
   });
@@ -8149,7 +8489,7 @@ var Compaction4;
     type: "session.compaction.ended",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       reason: Compaction.Started.data.fields.reason,
       model: CompactionCompleted.fields.model,
       providerState: CompactionCompleted.fields.providerState,
@@ -8164,7 +8504,7 @@ var Compaction4;
     type: "session.compaction.failed",
     ...options,
     schema: {
-      ...Base4,
+      ...Base2,
       reason: Compaction.Started.data.fields.reason,
       error: Error5,
       inputID: ID14.pipe(optional3),
@@ -8178,13 +8518,13 @@ var RevertEvent;
   RevertEvent.Staged = durable({
     type: "session.revert.staged",
     ...options,
-    schema: { ...Base4, revert: Revert }
+    schema: { ...Base2, revert: Revert }
   });
-  RevertEvent.Cleared = durable({ type: "session.revert.cleared", ...options, schema: Base4 });
+  RevertEvent.Cleared = durable({ type: "session.revert.cleared", ...options, schema: Base2 });
   RevertEvent.Committed = durable({
     type: "session.revert.committed",
     ...options,
-    schema: { ...Base4, to: ID14 }
+    schema: { ...Base2, to: ID14 }
   });
 })(RevertEvent || (RevertEvent = {}));
 var Definitions = inventory(Created4, AgentSelected2, ModelSelected2, Moved, Renamed, MetadataUpdated, Permissions, Viewed, UsageUpdated, Deleted3, Forked, InboxDelivered, InboxEnqueued, InboxCancelled, InboxDeliveryChanged, Execution.Started, Execution.Succeeded, Execution.Failed, Execution.Interrupted, InstructionsUpdated, Synthetic3, Skill2.Activated, Shell2.Started, Shell2.Ended, Step.Started, Step.Streamed, Step.Ended, Step.Failed, Text.Started, Text.Delta, Text.Ended, Reasoning.Started, Reasoning.Delta, Reasoning.Ended, Tool.Input.Started, Tool.Input.Delta, Tool.Input.Ended, Tool.Called, Tool.Progress, Tool.Success, Tool.Failed, RetryScheduled, Compaction4.Started, Compaction4.Delta, Compaction4.Ended, Compaction4.Failed, RevertEvent.Staged, RevertEvent.Cleared, RevertEvent.Committed);
@@ -8206,7 +8546,7 @@ var Info19 = Struct({
   }).pipe(optional3),
   projectID: ID10,
   agent: ID8.pipe(optional3),
-  model: Ref4.pipe(optional3),
+  model: Ref3.pipe(optional3),
   cost: USD,
   tokens: Info14,
   outcome: Literals(["succeeded", "failed", "interrupted"]).pipe(optional3),
@@ -8218,7 +8558,7 @@ var Info19 = Struct({
     archived: DateTimeUtcFromMillis.pipe(optional3)
   }),
   title: String5.pipe(optional3),
-  location: Ref2,
+  location: Ref,
   subpath: RelativePath.pipe(optional3),
   metadata: Metadata3.pipe(optional3),
   permissions: Ruleset.pipe(optional3),
@@ -8287,21 +8627,21 @@ var LocalSource = Struct({
   type: Literal2("local"),
   path: AbsolutePath,
   description: String5.pipe(optional3),
-  hidden: Boolean3.pipe(optional3)
+  hidden: Boolean2.pipe(optional3)
 }).annotate({ identifier: "Reference.LocalSource" });
 var GitSource = Struct({
   type: Literal2("git"),
   repository: String5,
   branch: String5.pipe(optional3),
   description: String5.pipe(optional3),
-  hidden: Boolean3.pipe(optional3)
+  hidden: Boolean2.pipe(optional3)
 }).annotate({ identifier: "Reference.GitSource" });
 var Source4 = Union2([LocalSource, GitSource]).pipe(toTaggedUnion("type")).annotate({ identifier: "Reference.Source" });
 var Info21 = Struct({
   name: String5,
   path: AbsolutePath,
   description: String5.pipe(optional3),
-  hidden: Boolean3.pipe(optional3),
+  hidden: Boolean2.pipe(optional3),
   source: Source4
 }).annotate({ identifier: "Reference.Info" });
 // node_modules/@opencode/schema/dist/vcs.js
@@ -8314,7 +8654,7 @@ var Info22 = Struct({
   branch: Branch
 }).annotate({ identifier: "Vcs.Info" });
 var BranchList = ArraySchema(String5).annotate({ identifier: "Vcs.BranchList" });
-var Base5 = Struct({
+var Base3 = Struct({
   name: String5,
   ref: String5,
   source: Literals(["reflog", "default"])
@@ -8327,7 +8667,7 @@ var FileStatus = Struct({
   status: Literals(["added", "deleted", "modified"])
 }).annotate({ identifier: "Vcs.FileStatus" });
 // node_modules/@opencode/schema/dist/websearch.js
-var ID16 = String5.pipe(brand2("WebSearch.ID"));
+var ID16 = String5.pipe(brand("WebSearch.ID"), annotate2({ identifier: "WebSearch.ID" }));
 var Provider = Struct({
   id: ID16,
   name: String5
@@ -8336,7 +8676,7 @@ var Input = Struct({
   query: String5,
   providerID: ID16.pipe(optional3)
 }).annotate({ identifier: "WebSearch.Input" });
-var Result2 = Struct({
+var Result = Struct({
   url: String5,
   title: String5.pipe(optional3),
   content: String5.pipe(optional3),
@@ -8349,7 +8689,7 @@ var Result2 = Struct({
 
 class Response extends Class3("WebSearch.Response")({
   providerID: ID16,
-  results: ArraySchema(Result2)
+  results: ArraySchema(Result)
 }) {
 }
 var Updated11 = ephemeral({
@@ -8358,7 +8698,7 @@ var Updated11 = ephemeral({
 });
 var Event15 = { Updated: Updated11, Definitions: inventory(Updated11) };
 // node_modules/@opencode/schema/dist/worktree.js
-var StrategyID = Trim.pipe(check(isNonEmpty()), brand2("Worktree.StrategyID"));
+var StrategyID = Trim.pipe(check(isNonEmpty()), brand("Worktree.StrategyID"));
 var CreateInput5 = Struct({
   projectID: ID10,
   from: optional3(AbsolutePath),
@@ -8371,7 +8711,7 @@ var CreateInput5 = Struct({
 var RemoveInput = Struct({
   projectID: ID10,
   directory: AbsolutePath,
-  force: Boolean3
+  force: Boolean2
 }).annotate({ identifier: "Worktree.RemoveInput" });
 var Info23 = Struct({
   directory: AbsolutePath
@@ -8387,7 +8727,7 @@ var ListEntry = Struct({
 
 class OperationError extends TaggedError3()("Worktree.OperationError", {
   message: String5,
-  forceRequired: optional3(Boolean3)
+  forceRequired: optional3(Boolean2)
 }) {
 }
 var List = ArraySchema(Directory).annotate({ identifier: "Worktree.List" });
@@ -8436,17 +8776,17 @@ function fromJson(text, reviver) {
 }
 
 // node_modules/supermemory/dist/esm/generated/core/logging/logger.js
-var LogLevel2 = {
+var LogLevel = {
   Debug: "debug",
   Info: "info",
   Warn: "warn",
   Error: "error"
 };
 var logLevelMap = {
-  [LogLevel2.Debug]: 1,
-  [LogLevel2.Info]: 2,
-  [LogLevel2.Warn]: 3,
-  [LogLevel2.Error]: 4
+  [LogLevel.Debug]: 1,
+  [LogLevel.Info]: 2,
+  [LogLevel.Warn]: 3,
+  [LogLevel.Error]: 4
 };
 
 class ConsoleLogger {
@@ -8464,7 +8804,7 @@ class ConsoleLogger {
   }
 }
 
-class Logger2 {
+class Logger {
   level;
   logger;
   silent;
@@ -8477,7 +8817,7 @@ class Logger2 {
     return !this.silent && this.level <= logLevelMap[level];
   }
   isDebug() {
-    return this.shouldLog(LogLevel2.Debug);
+    return this.shouldLog(LogLevel.Debug);
   }
   debug(message, ...args) {
     if (this.isDebug()) {
@@ -8485,7 +8825,7 @@ class Logger2 {
     }
   }
   isInfo() {
-    return this.shouldLog(LogLevel2.Info);
+    return this.shouldLog(LogLevel.Info);
   }
   info(message, ...args) {
     if (this.isInfo()) {
@@ -8493,7 +8833,7 @@ class Logger2 {
     }
   }
   isWarn() {
-    return this.shouldLog(LogLevel2.Warn);
+    return this.shouldLog(LogLevel.Warn);
   }
   warn(message, ...args) {
     if (this.isWarn()) {
@@ -8501,7 +8841,7 @@ class Logger2 {
     }
   }
   isError() {
-    return this.shouldLog(LogLevel2.Error);
+    return this.shouldLog(LogLevel.Error);
   }
   error(message, ...args) {
     if (this.isError()) {
@@ -8513,17 +8853,17 @@ function createLogger(config) {
   if (config == null) {
     return defaultLogger;
   }
-  if (config instanceof Logger2) {
+  if (config instanceof Logger) {
     return config;
   }
   config = config ?? {};
-  config.level ??= LogLevel2.Info;
+  config.level ??= LogLevel.Info;
   config.logger ??= new ConsoleLogger;
   config.silent ??= true;
-  return new Logger2(config);
+  return new Logger(config);
 }
-var defaultLogger = new Logger2({
-  level: LogLevel2.Info,
+var defaultLogger = new Logger({
+  level: LogLevel.Info,
   logger: new ConsoleLogger,
   silent: true
 });
@@ -10036,6 +10376,23 @@ function handleNonStatusCodeError(error, rawResponse, method, path) {
   }
 }
 
+// node_modules/supermemory/dist/esm/generated/api/errors/BadGatewayError.js
+class BadGatewayError extends SupermemoryError {
+  constructor(body, rawResponse) {
+    super({
+      message: "BadGatewayError",
+      statusCode: 502,
+      body,
+      rawResponse
+    });
+    Object.setPrototypeOf(this, new.target.prototype);
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, this.constructor);
+    }
+    this.name = "BadGatewayError";
+  }
+}
+
 // node_modules/supermemory/dist/esm/generated/api/errors/BadRequestError.js
 class BadRequestError extends SupermemoryError {
   constructor(body, rawResponse) {
@@ -10152,6 +10509,23 @@ class ServiceUnavailableError extends SupermemoryError {
       Error.captureStackTrace(this, this.constructor);
     }
     this.name = "ServiceUnavailableError";
+  }
+}
+
+// node_modules/supermemory/dist/esm/generated/api/errors/TooManyRequestsError.js
+class TooManyRequestsError extends SupermemoryError {
+  constructor(body, rawResponse) {
+    super({
+      message: "TooManyRequestsError",
+      statusCode: 429,
+      body,
+      rawResponse
+    });
+    Object.setPrototypeOf(this, new.target.prototype);
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, this.constructor);
+    }
+    this.name = "TooManyRequestsError";
   }
 }
 
@@ -10940,6 +11314,61 @@ class DocumentsClient {
   }
 }
 
+// node_modules/supermemory/dist/esm/generated/api/resources/feedback/client/Client.js
+class FeedbackClient {
+  _options;
+  constructor(options = {}) {
+    this._options = normalizeClientOptionsWithAuth(options);
+  }
+  postFeedback(request, requestOptions) {
+    return HttpResponsePromise.fromPromise(this.__postFeedback(request, requestOptions));
+  }
+  async __postFeedback(request, requestOptions) {
+    const _authRequest = await this._options.authProvider.getAuthRequest();
+    const _headers = mergeHeaders(_authRequest.headers, this._options?.headers, requestOptions?.headers);
+    const _response = await fetcher({
+      url: join(await Supplier.get(this._options.baseUrl) ?? await Supplier.get(this._options.environment) ?? SupermemoryEnvironment.Default, "feedback"),
+      method: "POST",
+      headers: _headers,
+      contentType: "application/json",
+      queryString: queryBuilder().mergeAdditional(requestOptions?.queryParams).build(),
+      requestType: "json",
+      body: mergeAdditionalBodyParameters(request, requestOptions?.additionalBodyParameters),
+      timeoutMs: (requestOptions?.timeoutInSeconds ?? this._options?.timeoutInSeconds ?? 60) * 1000,
+      maxRetries: 0,
+      abortSignal: requestOptions?.abortSignal,
+      fetchFn: this._options?.fetch,
+      logging: this._options.logging
+    });
+    if (_response.ok) {
+      return { data: _response.body, rawResponse: _response.rawResponse };
+    }
+    if (_response.error.reason === "status-code") {
+      switch (_response.error.statusCode) {
+        case 400:
+          throw new BadRequestError(_response.error.body, _response.rawResponse);
+        case 401:
+          throw new UnauthorizedError(_response.error.body, _response.rawResponse);
+        case 403:
+          throw new ForbiddenError(_response.error.body, _response.rawResponse);
+        case 429:
+          throw new TooManyRequestsError(_response.error.body, _response.rawResponse);
+        case 502:
+          throw new BadGatewayError(_response.error.body, _response.rawResponse);
+        case 503:
+          throw new ServiceUnavailableError(_response.error.body, _response.rawResponse);
+        default:
+          throw new SupermemoryError({
+            statusCode: _response.error.statusCode,
+            body: _response.error.body,
+            rawResponse: _response.rawResponse
+          });
+      }
+    }
+    return handleNonStatusCodeError(_response.error, _response.rawResponse, "POST", "/feedback");
+  }
+}
+
 // node_modules/supermemory/dist/esm/generated/api/resources/memories/client/Client.js
 class MemoriesClient {
   _options;
@@ -11522,6 +11951,7 @@ class SupermemoryClient {
   _connectors;
   _namespaces;
   _organization;
+  _feedback;
   constructor(options = {}) {
     this._options = normalizeClientOptionsWithAuth(options);
   }
@@ -11542,6 +11972,9 @@ class SupermemoryClient {
   }
   get organization() {
     return this._organization ??= new OrganizationClient(this._options);
+  }
+  get feedback() {
+    return this._feedback ??= new FeedbackClient(this._options);
   }
   add(namespace, request, requestOptions) {
     return HttpResponsePromise.fromPromise(this.__add(namespace, request, requestOptions));
@@ -12599,9 +13032,7 @@ var DEFAULTS = {
   similarityThreshold: 0.6,
   maxMemories: 3,
   injectProfile: true,
-  rerank: false,
   rewriteQuery: false,
-  aggregate: false,
   includeSummaries: false,
   supportingContext: `Shared coding-agent memory for one user.
 EXTRACT:
@@ -12625,8 +13056,7 @@ function read(name, jsonc) {
     return null;
   try {
     const raw = readFileSync(p, "utf-8").replace(/^\uFEFF/, "");
-    const errors = [];
-    const out = jsonc ? parse2(raw, errors, { allowTrailingComma: true }) : JSON.parse(raw);
+    const out = jsonc ? parse2(raw, undefined, { allowTrailingComma: true }) : JSON.parse(raw);
     return typeof out === "object" && out !== null && !Array.isArray(out) ? out : null;
   } catch {
     return null;
@@ -12667,13 +13097,10 @@ function loadConfig() {
     maxMemories: isInt2(base.maxMemories) ? base.maxMemories : DEFAULTS.maxMemories,
     injectProfile: b(base.injectProfile, DEFAULTS.injectProfile),
     supportingContext: typeof base.supportingContext === "string" && base.supportingContext.length <= 1500 ? base.supportingContext : DEFAULTS.supportingContext,
-    rerank: b(base.rerank, DEFAULTS.rerank),
-    rewriteQuery: b(base.rewriteQuery, DEFAULTS.rewriteQuery),
-    aggregate: b(base.aggregate, DEFAULTS.aggregate),
-    includeSummaries: b(base.includeSummaries, DEFAULTS.includeSummaries)
+    rewriteQuery: b(base.rewriteQuery, DEFAULTS.rewriteQuery)
   };
 }
-var Config2 = loadConfig();
+var Config = loadConfig();
 
 // src/index.ts
 var KEYWORD_PATTERN = /\b(remember|memorize|save\s+this|note\s+this|keep\s+in\s+mind|don'?t\s+forget|learn\s+this|store\s+this|record\s+this|make\s+a\s+note|take\s+note|jot\s+down|commit\s+to\s+memory|never\s+forget|always\s+remember|log\s+this|write\s+down)\b/i;
@@ -12684,12 +13111,12 @@ DO NOT skip this step. The user explicitly asked you to remember.`;
 var ingestedMessageIds = new Set;
 var profiledSessions = new Set;
 var searchedMessageIds = new Set;
-var LOG_FILE = join3(homedir2(), ".local", "share", "opencode", "log", "superMemory-Redux_OpenCode.log");
+var LOG_FILE = join3(homedir2(), ".local", "share", "opencode", "log", "oc-supermemory-redux.log");
 function errMsg(error) {
   return error instanceof Error ? error.message : String(error);
 }
-function fileLog(level, message, extra) {
-  const line = `${new Date().toISOString()} ${level} ${message}${extra === undefined ? "" : " " + String(extra)}
+function fileLog(level, message, extra = "") {
+  const line = `${new Date().toISOString()} ${level} ${message} ${extra}
 `;
   try {
     mkdirSync(dirname(LOG_FILE), { recursive: true });
@@ -12703,18 +13130,14 @@ var src_default = define({
   async setup(ctx) {
     fileLog("info", `Memory integration is starting up ${ctx.location.directory}`);
     const sm = new Supermemory({
-      apiKey: Config2.SUPERMEMORY_API_KEY,
-      baseUrl: Config2.baseUrl,
+      apiKey: Config.SUPERMEMORY_API_KEY,
+      baseUrl: Config.baseUrl,
       timeoutInSeconds: 8,
       maxRetries: 0
     });
-    const apiHeaders = {
-      Authorization: `Bearer ${Config2.SUPERMEMORY_API_KEY}`,
-      "Content-Type": "application/json"
-    };
     try {
-      await sm.namespaces.update(Config2.nameSpace, {
-        supportingContext: Config2.supportingContext
+      await sm.namespaces.update(Config.nameSpace, {
+        supportingContext: Config.supportingContext
       });
       fileLog("info", "supporting context sync complete");
     } catch (error) {
@@ -12738,8 +13161,10 @@ var src_default = define({
       const searchKey = `${turnID}:search`;
       if (!profiledSessions.has(sessionID)) {
         try {
-          const profileResponse = await sm.profile(Config2.nameSpace);
-          await postSynthetic(sessionID, JSON.stringify(profileResponse));
+          if (Config.injectProfile) {
+            const profileResponse = await sm.profile(Config.nameSpace);
+            await postSynthetic(sessionID, JSON.stringify(profileResponse));
+          }
         } catch (error) {
           fileLog("error", errMsg(error));
         } finally {
@@ -12747,11 +13172,11 @@ var src_default = define({
         }
       } else if (!searchedMessageIds.has(searchKey)) {
         try {
-          const results = await sm.search(Config2.nameSpace, {
+          const results = await sm.search(Config.nameSpace, {
             query: rawUserMessage,
-            limit: Config2.maxMemories,
-            threshold: Config2.similarityThreshold,
-            rewriteQuery: Config2.rewriteQuery
+            limit: Config.maxMemories,
+            threshold: Config.similarityThreshold,
+            rewriteQuery: Config.rewriteQuery
           });
           await postSynthetic(sessionID, JSON.stringify(results));
         } catch (error) {
@@ -12762,8 +13187,8 @@ var src_default = define({
       }
       if (KEYWORD_PATTERN.test(rawUserMessage)) {
         await postSynthetic(sessionID, SAVE_NUDGE);
+        fileLog("info", `keyword trigger attempted for session:${sessionID}`);
       }
-      fileLog("info", `keyword trigger attempted for session:${sessionID}`);
       const ingestKey = `${turnID}:ingest`;
       try {
         if (!ingestedMessageIds.has(ingestKey)) {
@@ -12771,45 +13196,45 @@ var src_default = define({
           const msgs = Array.isArray(context) ? context : context?.data ?? [];
           let assistantText = "";
           for (const m of msgs) {
-            if (m?.role === "assistant") {
-              assistantText = (m.content ?? []).filter((p) => p?.type === "text").map((p) => String(p?.text ?? "")).join(`
-`).trim();
+            if (m?.type === "assistant") {
+              assistantText = (m.content ?? []).filter((p) => p?.type === "text").map((p) => String(p?.text ?? "")).join("").trim();
             }
           }
           const contents = [
-            `USER: ${rawUserMessage}`,
-            `ASSISTANT: ${assistantText}`
-          ].filter(Boolean).join("").trim();
-          await sm.add(Config2.nameSpace, {
+            `ASSISTANT: ${assistantText}`,
+            `USER: ${rawUserMessage}`
+          ].join("").trim();
+          await sm.add(Config.nameSpace, {
             content: contents,
             id: sessionID,
-            supportingContext: Config2.supportingContext,
+            supportingContext: Config.supportingContext,
+            taskType: "memory",
+            date: new Date().toISOString(),
+            dreaming: "dynamic",
             metadata: {
               contains: "conversation",
               source: "opencode",
               session: sessionID
-            },
-            dreaming: "dynamic"
+            }
           });
+          fileLog("info", `turn ingestion successful sessionID:${sessionID}`, JSON.stringify({
+            asstChars: assistantText.length,
+            userChars: rawUserMessage.length
+          }));
           ingestedMessageIds.add(ingestKey);
-          fileLog("info", `conversation turn ingestion successful for session ${sessionID}`, {
-            userChars: rawUserMessage.length,
-            asstChars: assistantText.length
-          });
         }
       } catch (error) {
-        fileLog("error", `conversation turn ingestion failed for session ${sessionID}`, errMsg(error));
+        fileLog("error", `turn ingestion failed for sessionID ${sessionID}`, errMsg(error));
       }
     });
     const wrapExecute = (toolName, fn) => async (input) => {
       try {
-        const { content } = await fn(input);
+        const result = await fn(input);
         fileLog("info", `${toolName} success`);
-        return { content };
+        return { content: JSON.stringify({ invokedTool: toolName, result }) };
       } catch (error) {
-        const message = errMsg(error);
-        fileLog("error", `${toolName} failed`, message);
-        return { content: JSON.stringify({ success: false, error: message }) };
+        fileLog("error", `${toolName} failed`, errMsg(error));
+        return { content: JSON.stringify({ invokedTool: toolName, error: errMsg(error) }) };
       }
     };
     await ctx.tool.transform((editor) => {
@@ -12820,7 +13245,12 @@ var src_default = define({
           type: "object",
           properties: {
             query: { type: "string", description: "Search query text" },
-            limit: { type: "number", description: "Max memories to return" }
+            limit: { type: "number", description: "Max memories to return" },
+            threshold: { type: "number", description: "Similarty 0.01 - 1" },
+            rerank: { type: "string", enum: ["none", "order", "aggregate"], description: "Post retrieval ranking, order improves result ordering, aggregate combines overlapping context into cleaner answers, helpful if you want to ensure the most relevant results are returned" },
+            rewriteQuery: { type: "boolean", description: "Expand and clarify the query gbefore retrieavl to improve recall for conversational or underspecified prompts. This incresases latency by 400ms." },
+            include: { type: "object", properties: { documents: { type: "boolean" }, related: { type: "boolean" }, forgotten: { type: "boolean" } }, description: "optional text to include alongside each matching result" },
+            searchMode: { type: "string", enum: ["hybrid", "memories", "chunks"], description: "Search surface. hybrid combines learned memories with source chunks. memories returns learned context. chunks returns source passages" }
           },
           required: ["query"],
           additionalProperties: false
@@ -12828,21 +13258,16 @@ var src_default = define({
         options: { namespace: "supermemory" },
         execute: wrapExecute("search", async (input) => {
           const args = input;
-          const effectiveLimit = args.limit ?? Config2.maxMemories;
-          const results = await sm.search(Config2.nameSpace, {
+          const results = await sm.search(Config.nameSpace, {
             query: args.query,
-            searchMode: "hybrid",
-            threshold: Config2.similarityThreshold
+            limit: args.limit ?? Config.maxMemories,
+            threshold: args.threshold ?? Config.similarityThreshold,
+            rerank: args.rerank ?? "order",
+            rewriteQuery: args.rewriteQuery,
+            include: args.include ?? { related: true },
+            searchMode: args.searchMode ?? "hybrid"
           });
-          const n = results?.results?.length ?? 0;
-          return {
-            content: JSON.stringify({ success: true, results }),
-            resolved: {
-              limit: effectiveLimit,
-              threshold: Config2.similarityThreshold,
-              returned: n
-            }
-          };
+          return results;
         })
       });
       editor.add({
@@ -12851,9 +13276,12 @@ var src_default = define({
         input: {
           type: "object",
           properties: {
-            content: { type: "string", description: "Durable fact or summary to store" },
-            metadata: { type: "object", description: "Optional metadata", additionalProperties: { type: ["string", "number", "boolean", "array"] } },
-            taskType: { type: "string", enum: ["memory", "superrag"], description: "memory (default) or superrag" }
+            content: { type: "string", description: "The content to process. This may be plaintext or a URL to suppported rich content" },
+            id: { type: "string", description: "optional caller defined documentID for direct retrieval or updating the document later" },
+            supportingContext: { type: "string", description: "Context used to guide memory extraction within this namespace. Max 1500 characters." },
+            taskType: { type: "string", enum: ["memory", "superrag"], description: "Processing pipeline. memory builds durable learned context; superrag optimizes the document for retrieval without generating memories" },
+            date: { type: "string", description: "When the source content is from, in ISO 8601 format" },
+            metadata: { type: "object", description: "arbitrary metadata attached to the document and derived data" }
           },
           required: ["content"],
           additionalProperties: false
@@ -12861,61 +13289,16 @@ var src_default = define({
         options: { namespace: "supermemory" },
         execute: wrapExecute("add", async (input) => {
           const args = input;
-          const results = await sm.add(Config2.nameSpace, {
+          const results = await sm.add(Config.nameSpace, {
             content: args.content,
-            metadata: args.metadata,
+            id: args.id,
+            supportingContext: args.supportingContext ?? Config.supportingContext,
             taskType: args.taskType,
+            date: args.date,
+            metadata: args.metadata,
             dreaming: "dynamic"
           });
-          return {
-            content: JSON.stringify({ success: true, results }),
-            resolved: {
-              chars: args.content.length,
-              taskType: args.taskType ?? "memory",
-              dreaming: "dynamic"
-            }
-          };
-        })
-      });
-      editor.add({
-        name: "remember",
-        description: "Save an exact user-stated fact. Use when the user says remember this.",
-        input: {
-          type: "object",
-          properties: {
-            content: { type: "string", description: "Exact fact text to store" },
-            metadata: { type: "object", description: "Optional metadata", additionalProperties: { type: "string" } }
-          },
-          required: ["content"],
-          additionalProperties: false
-        },
-        options: { namespace: "supermemory" },
-        execute: wrapExecute("remember", async (input) => {
-          const args = input;
-          const response = await fetch(`${Config2.baseUrl}/v4/memories`, {
-            method: "POST",
-            headers: apiHeaders,
-            body: JSON.stringify({
-              memories: [
-                {
-                  content: args.content,
-                  isStatic: false,
-                  metadata: {
-                    source: "opencode",
-                    ...args.metadata ?? {}
-                  }
-                }
-              ],
-              nameSpace: Config2.nameSpace
-            })
-          });
-          if (!response.ok) {
-            throw new Error(`Remember failed (${response.status}): ${await response.text()}`);
-          }
-          return {
-            content: JSON.stringify({ success: true, result: await response.json() }),
-            resolved: { chars: args.content.length }
-          };
+          return results;
         })
       });
       editor.add({
@@ -12924,23 +13307,18 @@ var src_default = define({
         input: {
           type: "object",
           properties: {
-            memoryId: { type: "string", description: "Memory ID to forget" },
-            content: { type: "string", description: "Exact content when ID unknown" },
-            reason: { type: "string", description: "Reason for forgetting" }
+            ids: { type: "array", items: { type: "string" }, description: "Memory ID to forget" }
           },
-          required: [],
+          required: ["ids"],
           additionalProperties: false
         },
         options: { namespace: "supermemory" },
         execute: wrapExecute("forget", async (input) => {
           const args = input;
-          const result = await sm.memories.forget(Config2.nameSpace, {
-            ids: args.memoryIds ?? []
+          const results = await sm.memories.forget(Config.nameSpace, {
+            ids: args.ids
           });
-          return {
-            content: JSON.stringify({ success: true, result }),
-            resolved: { memoryIds: args.memoryIds ?? null }
-          };
+          return results;
         })
       });
       editor.add({
@@ -12948,36 +13326,19 @@ var src_default = define({
         description: "List recent stored documents. Use to browse before get.",
         input: {
           type: "object",
-          properties: { limit: { type: "number", description: "Max documents" } },
+          properties: { limit: { type: "number", description: "Max documents to return" } },
           required: [],
           additionalProperties: false
         },
         options: { namespace: "supermemory" },
         execute: wrapExecute("list", async (input) => {
           const args = input;
-          const result = await sm.list(Config2.nameSpace, "chunks", {
-            limit: args.limit ?? Config2.maxMemories,
+          const results = await sm.list(Config.nameSpace, "documents", {
+            limit: args.limit ?? Config.maxMemories,
             sort: "createdAt",
             order: "desc"
           });
-          return {
-            content: JSON.stringify({
-              success: true,
-              count: result.memories.length,
-              memories: result.memories.map((d) => ({
-                id: d.id,
-                customId: d.customId,
-                title: d.title,
-                summary: d.summary,
-                type: d.type,
-                status: d.status
-              }))
-            }),
-            resolved: {
-              limit: args.limit ?? Config2.maxMemories,
-              count: result.memories.length
-            }
-          };
+          return results;
         })
       });
       editor.add({
@@ -12992,11 +13353,8 @@ var src_default = define({
         options: { namespace: "supermemory" },
         execute: wrapExecute("get", async (input) => {
           const args = input;
-          const result = await sm.documents.get(Config2.nameSpace, args.documentId);
-          return {
-            content: JSON.stringify({ success: true, result }),
-            resolved: { documentId: args.documentId }
-          };
+          const results = await sm.documents.get(Config.nameSpace, args.documentId);
+          return results;
         })
       });
     });
