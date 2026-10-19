@@ -6,12 +6,10 @@ import { homedir } from "node:os";
 import { Config } from "./config.js";
 
 const KEYWORD_PATTERN = /\b(remember|memorize|save\s+this|note\s+this|keep\s+in\s+mind|don'?t\s+forget|learn\s+this|store\s+this|record\s+this|make\s+a\s+note|take\s+note|jot\s+down|commit\s+to\s+memory|never\s+forget|always\s+remember|log\s+this|write\s+down)\b/i;
-
-const SAVE_NUDGE = `[MEMORY TRIGGER DETECTED]
-The user wants you to remember something. Use the "SuperMemory Remember Tool" to save this information.
+const SAVE_NUDGE = `[MEMORY TRIGGER] The user wants you to remember something. 
+Use the "supermemory add tool" to save this information.
 Extract the durable facts and save it as a concise memory.
 DO NOT skip this step. The user explicitly asked you to remember.`;
-
 const ingestedMessageIds = new Set<string>();
 const profiledSessions = new Set<string>();
 const searchedMessageIds = new Set<string>();
@@ -19,7 +17,7 @@ const LOG_FILE = join(homedir(), ".local", "share", "opencode", "log", "oc-super
 
 function errMsg(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
+};
 
 function fileLog(
   level: "info" | "warn" | "error",
@@ -31,9 +29,9 @@ function fileLog(
     mkdirSync(dirname(LOG_FILE), { recursive: true })
     appendFileSync(LOG_FILE, line);
   } catch (error) {
-    console.error("[superMemory Redux] Log write failed:", errMsg(error));
+    console.error("[oc-supermemory-redux] Log write failed:", errMsg(error));
   }
-}
+};
 
 export default Plugin.define({
   id: "oc-superMemory-Redux",
@@ -43,15 +41,17 @@ export default Plugin.define({
       apiKey: Config.SUPERMEMORY_API_KEY,
       baseUrl: Config.baseUrl,
       timeoutInSeconds: 8,
-      maxRetries: 0,
+      maxRetries: 1,
     });
     try {
       await sm.namespaces.update(Config.nameSpace, {
         supportingContext: Config.supportingContext
-      });
-      fileLog("info", "supporting context sync complete");
+        }
+      )
+      fileLog("info", "supportingContext sync. completed")
     } catch (error) {
-      fileLog("warn", errMsg(error));
+      fileLog("warn", "unable to sync supportingContext with profile", errMsg(error)
+      )
     };
 
     const postSynthetic = async (
@@ -63,54 +63,56 @@ export default Plugin.define({
         text,
         delivery: "steer",
         resume: false,
-        metadata: { source: "opencode" }
-      });
+        metadata: { 
+          source: "supermemory injection" 
+          }
+        }
+      );
     };
 
     await ctx.session.hook("prompt", async (event) => {
       const rawUserMessage = event.prompt.text?.trim();
-      if (!rawUserMessage) return;
-
-      const sessionID = event.sessionID
+      const sessionID = event.sessionID;
       const turnID = `${sessionID}:${(event as any).messageID ?? rawUserMessage}`;
       const searchKey = `${turnID}:search`;
-
-      if (!profiledSessions.has(sessionID)) {
-        try {
-          if (Config.injectProfile) {
-            const profileResponse = await sm.profile(Config.nameSpace);
-            await postSynthetic(sessionID, JSON.stringify(profileResponse));
-          }
-        } catch (error) {
-          fileLog("error", errMsg(error));
-        } finally {
-          profiledSessions.add(sessionID);
-        }
-      } else if (!searchedMessageIds.has(searchKey)) {
-        try {
-          const results = await sm.search(Config.nameSpace, {
-            query: rawUserMessage,
-            limit: Config.maxMemories,
-            threshold: Config.similarityThreshold,
-            rewriteQuery: Config.rewriteQuery,
-          });
-          await postSynthetic(sessionID, JSON.stringify(results));
-        } catch (error) {
-          fileLog("error", errMsg(error))
-        } finally {
-          searchedMessageIds.add(searchKey)
-        }
-      };
-
-      if (KEYWORD_PATTERN.test(rawUserMessage)) {
-        await postSynthetic(sessionID, SAVE_NUDGE);
-        fileLog("info", `keyword trigger attempted for session:${sessionID}`);
-      };
-
       const ingestKey = `${turnID}:ingest`;
+      if (!rawUserMessage) return;
+      try { 
+        if (KEYWORD_PATTERN.test(rawUserMessage)) {
+          await postSynthetic(sessionID, SAVE_NUDGE)
+          fileLog("info", `memory trigger attempted for session:${sessionID}`)
+        }
+      } catch (error) {
+        fileLog("info", `Memory trigger failed with prompt:${rawUserMessage}`, errMsg(error))
+      };
+      if (!profiledSessions.has(sessionID) && Config.injectProfile) {
+        try {
+          const profileResponse = await sm.profile(Config.nameSpace)
+          await postSynthetic(sessionID, JSON.stringify(profileResponse))  
+          fileLog("info", `Profile injection successful for session:${sessionID}`);
+        } catch (error) {
+            fileLog("error", `profiile injection failed for session:${sessionID}`, errMsg(error));
+        }
+        profiledSessions.add(sessionID);
+      } else if (!searchedMessageIds.has(searchKey)) {
+          try {
+            const searchResults = await sm.search(Config.nameSpace, {
+              query: rawUserMessage,
+              limit: Config.maxMemories,
+              threshold: Config.similarityThreshold,
+              rewriteQuery: Config.rewriteQuery,
+              }
+            )
+            await postSynthetic(sessionID, JSON.stringify(searchResults))
+              fileLog("info", `Supermemory search successful for turn:${turnID}`)
+                searchedMessageIds.add(searchKey)
+          } catch (error) {
+              fileLog("error", `Supermemory prompt-query failed for turn:${turnID}`, errMsg(error))
+          }
+        };
 
-      try {
-        if (!ingestedMessageIds.has(ingestKey)) {
+      if (!ingestedMessageIds.has(ingestKey)) {
+        try {
           const context = await ctx.session.context({ sessionID });
           const msgs: any[] = Array.isArray(context) ? context : ((context as any)?.data ?? []);
           let assistantText = ""
@@ -126,7 +128,7 @@ export default Plugin.define({
           const contents = [
             `ASSISTANT: ${assistantText}`,
             `USER: ${rawUserMessage}`
-          ].join("").trim();
+            ].join("|").trim();
 
           await sm.add(Config.nameSpace, {
             content: contents,
@@ -139,20 +141,23 @@ export default Plugin.define({
               contains: "conversation",
               source: "opencode",
               session: sessionID
+              }
             }
-          });
-          fileLog("info", `turn ingestion successful sessionID:${sessionID}`,
+          )
+          fileLog("info", `turn ingestion successful session:${sessionID}`,
             JSON.stringify({
-            asstChars: assistantText.length,
-            userChars: rawUserMessage.length
-          })
-          );
+              asstChars: assistantText.length,
+              userChars: rawUserMessage.length
+              }
+            )
+          )
           ingestedMessageIds.add(ingestKey);
-        }
-      } catch (error) {
-        fileLog("error", `turn ingestion failed for sessionID ${sessionID}`, errMsg(error));
+        } catch (error) {
+          fileLog("error", `turn ingestion failed for session:${sessionID}`, errMsg(error));
+          }
+        };
       }
-    });
+    );
 
     const wrapExecute = (
       toolName: string,
@@ -237,12 +242,12 @@ export default Plugin.define({
             };
           const results = await sm.add(Config.nameSpace,  {
             content: args.content,
-            id: args.id,
+            id: args.id ?? crypto.randomUUID(),
             supportingContext: args.supportingContext ?? Config.supportingContext,
-            taskType: args.taskType,
-            date: args.date,
+            taskType: args.taskType ?? "memory",
+            date: args.date ?? new Date().toISOString(),
             metadata: args.metadata,
-            dreaming: "dynamic",
+            dreaming: "dynamic"
           });
           return results;
         }),
@@ -302,9 +307,9 @@ export default Plugin.define({
           const results = await sm.documents.get(Config.nameSpace, args.documentId
           );
           return results
-        }),
+          }),
+        });
       });
-    });
-  },
-}
+    }
+  }
 );

@@ -13104,8 +13104,8 @@ var Config = loadConfig();
 
 // src/index.ts
 var KEYWORD_PATTERN = /\b(remember|memorize|save\s+this|note\s+this|keep\s+in\s+mind|don'?t\s+forget|learn\s+this|store\s+this|record\s+this|make\s+a\s+note|take\s+note|jot\s+down|commit\s+to\s+memory|never\s+forget|always\s+remember|log\s+this|write\s+down)\b/i;
-var SAVE_NUDGE = `[MEMORY TRIGGER DETECTED]
-The user wants you to remember something. Use the "SuperMemory Remember Tool" to save this information.
+var SAVE_NUDGE = `[MEMORY TRIGGER] The user wants you to remember something. 
+Use the "supermemory add tool" to save this information.
 Extract the durable facts and save it as a concise memory.
 DO NOT skip this step. The user explicitly asked you to remember.`;
 var ingestedMessageIds = new Set;
@@ -13122,7 +13122,7 @@ function fileLog(level, message, extra = "") {
     mkdirSync(dirname(LOG_FILE), { recursive: true });
     appendFileSync(LOG_FILE, line);
   } catch (error) {
-    console.error("[superMemory Redux] Log write failed:", errMsg(error));
+    console.error("[oc-supermemory-redux] Log write failed:", errMsg(error));
   }
 }
 var src_default = define({
@@ -13133,15 +13133,15 @@ var src_default = define({
       apiKey: Config.SUPERMEMORY_API_KEY,
       baseUrl: Config.baseUrl,
       timeoutInSeconds: 8,
-      maxRetries: 0
+      maxRetries: 1
     });
     try {
       await sm.namespaces.update(Config.nameSpace, {
         supportingContext: Config.supportingContext
       });
-      fileLog("info", "supporting context sync complete");
+      fileLog("info", "supportingContext sync. completed");
     } catch (error) {
-      fileLog("warn", errMsg(error));
+      fileLog("warn", "unable to sync supportingContext with profile", errMsg(error));
     }
     const postSynthetic = async (sessionID, text) => {
       return await ctx.session.synthetic({
@@ -13149,49 +13149,53 @@ var src_default = define({
         text,
         delivery: "steer",
         resume: false,
-        metadata: { source: "opencode" }
+        metadata: {
+          source: "supermemory injection"
+        }
       });
     };
     await ctx.session.hook("prompt", async (event) => {
       const rawUserMessage = event.prompt.text?.trim();
-      if (!rawUserMessage)
-        return;
       const sessionID = event.sessionID;
       const turnID = `${sessionID}:${event.messageID ?? rawUserMessage}`;
       const searchKey = `${turnID}:search`;
-      if (!profiledSessions.has(sessionID)) {
+      const ingestKey = `${turnID}:ingest`;
+      if (!rawUserMessage)
+        return;
+      try {
+        if (KEYWORD_PATTERN.test(rawUserMessage)) {
+          await postSynthetic(sessionID, SAVE_NUDGE);
+          fileLog("info", `memory trigger attempted for session:${sessionID}`);
+        }
+      } catch (error) {
+        fileLog("info", `Memory trigger failed with prompt:${rawUserMessage}`, errMsg(error));
+      }
+      if (!profiledSessions.has(sessionID) && Config.injectProfile) {
         try {
-          if (Config.injectProfile) {
-            const profileResponse = await sm.profile(Config.nameSpace);
-            await postSynthetic(sessionID, JSON.stringify(profileResponse));
-          }
-        } catch (error) {
-          fileLog("error", errMsg(error));
-        } finally {
+          const profileResponse = await sm.profile(Config.nameSpace);
+          await postSynthetic(sessionID, JSON.stringify(profileResponse));
           profiledSessions.add(sessionID);
+          fileLog("info", `Profile injection successful for session:${sessionID}`);
+        } catch (error) {
+          fileLog("error", `profiile injection failed for session:${sessionID}`, errMsg(error));
         }
       } else if (!searchedMessageIds.has(searchKey)) {
         try {
-          const results = await sm.search(Config.nameSpace, {
+          const searchResults = await sm.search(Config.nameSpace, {
             query: rawUserMessage,
             limit: Config.maxMemories,
             threshold: Config.similarityThreshold,
             rewriteQuery: Config.rewriteQuery
           });
-          await postSynthetic(sessionID, JSON.stringify(results));
-        } catch (error) {
-          fileLog("error", errMsg(error));
-        } finally {
+          await postSynthetic(sessionID, JSON.stringify(searchResults));
+          fileLog("info", `Supermemory search successful for turn:${turnID}`);
           searchedMessageIds.add(searchKey);
+        } catch (error) {
+          fileLog("error", `Supermemory prompt-query failed for turn:${turnID}`, errMsg(error));
         }
       }
-      if (KEYWORD_PATTERN.test(rawUserMessage)) {
-        await postSynthetic(sessionID, SAVE_NUDGE);
-        fileLog("info", `keyword trigger attempted for session:${sessionID}`);
-      }
-      const ingestKey = `${turnID}:ingest`;
-      try {
-        if (!ingestedMessageIds.has(ingestKey)) {
+      if (!ingestedMessageIds.has(ingestKey)) {
+        try {
           const context = await ctx.session.context({ sessionID });
           const msgs = Array.isArray(context) ? context : context?.data ?? [];
           let assistantText = "";
@@ -13203,7 +13207,7 @@ var src_default = define({
           const contents = [
             `ASSISTANT: ${assistantText}`,
             `USER: ${rawUserMessage}`
-          ].join("").trim();
+          ].join("|").trim();
           await sm.add(Config.nameSpace, {
             content: contents,
             id: sessionID,
@@ -13217,14 +13221,14 @@ var src_default = define({
               session: sessionID
             }
           });
-          fileLog("info", `turn ingestion successful sessionID:${sessionID}`, JSON.stringify({
+          fileLog("info", `turn ingestion successful session:${sessionID}`, JSON.stringify({
             asstChars: assistantText.length,
             userChars: rawUserMessage.length
           }));
           ingestedMessageIds.add(ingestKey);
+        } catch (error) {
+          fileLog("error", `turn ingestion failed for session:${sessionID}`, errMsg(error));
         }
-      } catch (error) {
-        fileLog("error", `turn ingestion failed for sessionID ${sessionID}`, errMsg(error));
       }
     });
     const wrapExecute = (toolName, fn) => async (input) => {
@@ -13291,10 +13295,10 @@ var src_default = define({
           const args = input;
           const results = await sm.add(Config.nameSpace, {
             content: args.content,
-            id: args.id,
+            id: args.id ?? crypto.randomUUID(),
             supportingContext: args.supportingContext ?? Config.supportingContext,
-            taskType: args.taskType,
-            date: args.date,
+            taskType: args.taskType ?? "memory",
+            date: args.date ?? new Date().toISOString(),
             metadata: args.metadata,
             dreaming: "dynamic"
           });
