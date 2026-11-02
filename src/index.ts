@@ -87,9 +87,12 @@ export default Plugin.define({
       };
       if (!profiledSessions.has(sessionID) && Config.injectProfile) {
         try {
-          const profileResponse: any = await sm.profile(Config.nameSpace)
-          for (const key of Object.keys(profileResponse)) {
-            profileResponse[key] = (profileResponse[key] as unknown[]).slice(0, 25);  // mutates in place
+          const profileResponse: any = await sm.profile(Config.nameSpace);
+          const p = profileResponse?.profile;
+          if (p) {
+            p.static?.splice?.(25);
+            p.dynamic?.splice?.(25);
+            if (p.buckets) for (const k in p.buckets) p.buckets[k]?.splice?.(25);
           }
           await postSynthetic(sessionID, JSON.stringify(profileResponse))
           fileLog("info", `Profile injection successful for session:${sessionID}`);

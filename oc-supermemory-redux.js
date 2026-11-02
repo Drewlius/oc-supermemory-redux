@@ -13896,8 +13896,13 @@ var src_default = define({
       if (!profiledSessions.has(sessionID) && Config.injectProfile) {
         try {
           const profileResponse = await sm.profile(Config.nameSpace);
-          for (const key of Object.keys(profileResponse)) {
-            profileResponse[key] = profileResponse[key].slice(0, 25);
+          const p = profileResponse?.profile;
+          if (p) {
+            p.static?.splice?.(25);
+            p.dynamic?.splice?.(25);
+            if (p.buckets)
+              for (const k in p.buckets)
+                p.buckets[k]?.splice?.(25);
           }
           await postSynthetic(sessionID, JSON.stringify(profileResponse));
           fileLog("info", `Profile injection successful for session:${sessionID}`);
