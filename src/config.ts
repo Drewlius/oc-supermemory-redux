@@ -101,7 +101,7 @@ function loadConfig(): Config {
     key(f["supermemory.jsonc"]?.SUPERMEMORY_API_KEY) ??
     key(f["supermemory-credentials.jsonc"]?.SUPERMEMORY_API_KEY) ??
     key(f["supermemory.json"]?.SUPERMEMORY_API_KEY) ??
-    "dummy";
+    "dummy"
 
   const base = f["supermemory.jsonc"] ?? f["supermemory.json"] ?? {};
   return {

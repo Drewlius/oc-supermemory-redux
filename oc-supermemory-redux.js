@@ -443,6 +443,7 @@ function compareRecords(self2, that) {
 }
 function compareHashed(self2, that, hashOf, equivalent) {
   const groups = new Map;
+  let remaining = 0;
   for (const item of that) {
     const h = hashOf(item);
     const group = groups.get(h);
@@ -450,6 +451,7 @@ function compareHashed(self2, that, hashOf, equivalent) {
       group.push(item);
     else
       groups.set(h, [item]);
+    remaining++;
   }
   outer:
     for (const item of self2) {
@@ -459,13 +461,14 @@ function compareHashed(self2, that, hashOf, equivalent) {
           if (equivalent(item, group[i])) {
             group[i] = group[group.length - 1];
             group.pop();
+            remaining--;
             continue outer;
           }
         }
       }
       return false;
     }
-  return true;
+  return remaining === 0;
 }
 var entryHash = (entry) => hash(entry[0]);
 var equalEntries = (self2, that) => compareBoth(self2[0], that[0]) && compareBoth(self2[1], that[1]);
@@ -579,6 +582,9 @@ var CIRCULAR = "[Circular]";
 function formatPropertyKey(name) {
   return typeof name === "string" ? JSON.stringify(name) : String(name);
 }
+function formatPath(path) {
+  return path.map((key) => `[${formatPropertyKey(key)}]`).join("");
+}
 function formatDate(date) {
   try {
     return date.toISOString();
@@ -627,8 +633,35 @@ function formatJson(input, options) {
     if (current !== redacted) {
       ancestors.push(current);
     }
-    return current;
+    if (!hasGetter(current) || isJsonPrimitiveWrapper(current)) {
+      return current;
+    }
+    const serialized = new Proxy(current, {
+      get(target, key) {
+        const value = Reflect.get(target, key, target);
+        return Object.getOwnPropertyDescriptor(target, key)?.get !== undefined ? redact(value) : value;
+      }
+    });
+    ancestors.push(serialized);
+    return serialized;
   }, options?.space) ?? "null";
+}
+function hasGetter(object) {
+  for (const key of Object.getOwnPropertyNames(object)) {
+    if (Object.getOwnPropertyDescriptor(object, key)?.get !== undefined) {
+      return true;
+    }
+  }
+  return false;
+}
+function isJsonPrimitiveWrapper(object) {
+  for (const valueOf of [Number.prototype.valueOf, Boolean.prototype.valueOf, String.prototype.valueOf]) {
+    try {
+      Reflect.apply(valueOf, object, []);
+      return true;
+    } catch {}
+  }
+  return false;
 }
 
 // node_modules/effect/dist/Inspectable.js
@@ -659,7 +692,20 @@ var BaseProto = {
 };
 
 // node_modules/effect/dist/internal/stackTraceLimit.js
+var isStackTraceLimitWritable = () => {
+  const desc = Object.getOwnPropertyDescriptor(Error, "stackTraceLimit");
+  if (desc === undefined) {
+    return Object.isExtensible(Error);
+  }
+  return Object.hasOwn(desc, "writable") ? desc.writable === true : desc.set !== undefined;
+};
+var canWriteStackTraceLimit = /* @__PURE__ */ isStackTraceLimitWritable();
 var getStackTraceLimit = () => Error.stackTraceLimit;
+var setStackTraceLimit = (value) => {
+  if (canWriteStackTraceLimit) {
+    Error.stackTraceLimit = value;
+  }
+};
 
 // node_modules/effect/dist/Utils.js
 class SingleShotGen {
@@ -693,8 +739,13 @@ var pickInternalCall = () => {
       } finally {}
     }
   };
-  const isNotOptimizedAway = getStackTraceLimit() !== 0 && standard[InternalTypeId](() => new Error().stack)?.includes(InternalTypeId) === true;
-  return isNotOptimizedAway ? standard[InternalTypeId] : forced[InternalTypeId];
+  const limit = getStackTraceLimit();
+  if (limit === 0)
+    return forced[InternalTypeId];
+  setStackTraceLimit(2);
+  const error = standard[InternalTypeId](() => new Error);
+  setStackTraceLimit(limit);
+  return error.stack?.includes(InternalTypeId) === true ? standard[InternalTypeId] : forced[InternalTypeId];
 };
 var internalCall = /* @__PURE__ */ pickInternalCall();
 
@@ -712,6 +763,10 @@ function assignProperty(self2, key, value) {
   }
 }
 function assignProperties(self2, source) {
+  if (!Object.hasOwn(source, "__proto__")) {
+    Object.assign(self2, source);
+    return;
+  }
   for (const key of Reflect.ownKeys(source)) {
     if (Object.prototype.propertyIsEnumerable.call(source, key)) {
       assignProperty(self2, key, source[key]);
@@ -801,7 +856,7 @@ class CauseImpl {
   toJSON() {
     return {
       _id: "Cause",
-      failures: this.reasons.map((f) => f.toJSON())
+      reasons: this.reasons.map((f) => f.toJSON())
     };
   }
   toString() {
@@ -908,6 +963,15 @@ var causeCombine = /* @__PURE__ */ dual(2, (self2, that) => {
   const newCause = new CauseImpl(dedupeReasons(self2.reasons, that.reasons));
   return equals(self2, newCause) ? self2 : newCause;
 });
+var causeAddInterrupts = (self2, interrupts) => {
+  const reasons = self2.reasons.slice();
+  for (const reason of interrupts.reasons) {
+    if (isInterruptReason(reason) && !reasons.some((r) => isInterruptReason(r) && r.fiberId === reason.fiberId && r.annotations === reason.annotations)) {
+      reasons.push(reason);
+    }
+  }
+  return reasons.length === self2.reasons.length ? self2 : new CauseImpl(reasons);
+};
 var causeFail = (error) => new CauseImpl([new Fail(error)]);
 
 class Die extends ReasonBase {
@@ -1031,7 +1095,7 @@ var exitFailCause = /* @__PURE__ */ makeExit({
       if (skippedHandler) {
         cause = causeFromReasons(cause.reasons.filter((reason) => reason._tag !== "Fail"));
       }
-      cause = causeCombine(cause, interruptedCause);
+      cause = causeAddInterrupts(cause, interruptedCause);
       annotated = true;
     }
     return cont ? cont[contE](cause, fiber, annotated ? undefined : this) : fiber.yieldWith(annotated ? exitFailCause(cause) : this);
@@ -1099,6 +1163,7 @@ var TaggedError = (tag) => {
   return Base;
 };
 var DoneTypeId = "~effect/Cause/Done";
+var isDone = (u) => hasProperty(u, DoneTypeId);
 var DoneVoid = {
   [DoneTypeId]: DoneTypeId,
   _tag: "Done",
@@ -1437,7 +1502,9 @@ var addUnsafe = (self2, key, service) => {
   const impl = self2;
   const cacheRoot = cacheKeys.has(key) ? undefined : impl.cacheRoot;
   if (impl.depth >= MaxDepth) {
-    const map = new Map(impl.mapUnsafe);
+    const map = new Map(impl._flat ?? impl.base);
+    if (!impl._flat)
+      applyOverlays(map, impl.overlay);
     map.set(key, service);
     return makeImpl(cacheRoot, map, undefined, 0);
   }
@@ -1488,6 +1555,8 @@ var isArrayNonEmpty = (self2) => self2.length > 0;
 var succeed2 = succeed;
 var fail2 = fail;
 var isFailure2 = isFailure;
+var isSuccess2 = isSuccess;
+var map = /* @__PURE__ */ dual(2, (self2, f) => isSuccess2(self2) ? succeed2(f(self2.success)) : self2);
 var match2 = /* @__PURE__ */ dual(2, (self2, {
   onFailure,
   onSuccess
@@ -1500,7 +1569,7 @@ var isArray = Array2.isArray;
 var isArrayNonEmpty2 = isArrayNonEmpty;
 var isReadonlyArrayNonEmpty = isArrayNonEmpty;
 var empty2 = () => [];
-var map = /* @__PURE__ */ dual(2, (self2, f) => self2.map(f));
+var map2 = /* @__PURE__ */ dual(2, (self2, f) => self2.map(f));
 
 // node_modules/effect/dist/Scheduler.js
 var Scheduler = /* @__PURE__ */ Reference("effect/Scheduler", {
@@ -1681,19 +1750,13 @@ class Interrupt extends ReasonBase {
     return isInterruptReason(that) && this.fiberId === that.fiberId && this.annotations === that.annotations;
   }
   [symbol]() {
-    return combine(string(`${this._tag}:${this.fiberId}`))(random(this.annotations));
+    return string(`${this._tag}:${this.fiberId}`);
   }
 }
 var causeInterrupt = (fiberId) => new CauseImpl([new Interrupt(fiberId)]);
-var findError = (self2) => {
-  for (let i = 0;i < self2.reasons.length; i++) {
-    const reason = self2.reasons[i];
-    if (reason._tag === "Fail") {
-      return succeed2(reason.error);
-    }
-  }
-  return fail2(self2);
-};
+var hasFails = (self2) => self2.reasons.some(isFailReason);
+var hasDies = (self2) => self2.reasons.some(isDieReason);
+var causeElectDefects = (self2) => hasDies(self2) && hasFails(self2) ? causeFromReasons(self2.reasons.map((reason) => reason._tag === "Fail" && !isDone(reason.error) ? new Die(reason.error, reason.annotations) : reason)) : self2;
 var hasInterrupts = (self2) => self2.reasons.some(isInterruptReason);
 var causeMap = /* @__PURE__ */ dual(2, (self2, f) => {
   let hasFail = false;
@@ -1782,7 +1845,7 @@ class FiberImpl {
     if (annotations) {
       cause = causeAnnotate(cause, annotations);
     }
-    this._interruptedCause = this._interruptedCause ? causeCombine(this._interruptedCause, cause) : cause;
+    this._interruptedCause = this._interruptedCause ? causeAddInterrupts(this._interruptedCause, cause) : cause;
     if (this.interruptible) {
       if (this._running) {
         this._deferredInterrupt = true;
@@ -1800,7 +1863,11 @@ class FiberImpl {
     } else if (this._asyncContext !== undefined) {
       const asyncContext = this._asyncContext;
       this._asyncContext = undefined;
-      return asyncContext.runInAsyncScope(this.evaluate, this, effect);
+      try {
+        return asyncContext.runInAsyncScope(this.evaluate, this, effect);
+      } finally {
+        asyncContext.emitDestroy();
+      }
     } else if (this._yielded !== undefined) {
       const yielded = this._yielded;
       this._yielded = undefined;
@@ -1842,37 +1909,39 @@ class FiberImpl {
     this.currentOpCount = 0;
     try {
       while (true) {
-        if (this._deferredInterrupt) {
-          this._deferredInterrupt = false;
-          current = failCause(this._interruptedCause);
-        }
-        this.currentOpCount++;
-        const cache = this.cache;
-        if (!yielding && !cache.preventYield && cache.scheduler.shouldYield(this)) {
-          yielding = true;
-          const prev = current;
-          current = flatMap(yieldNow, () => prev);
-        }
-        current = cache.tracerContext ? cache.tracerContext(current, this) : current[evaluate](this);
-        if (current === Yield) {
-          const yielded = this._yielded;
-          if (ExitTypeId in yielded) {
+        try {
+          if (this._deferredInterrupt) {
             this._deferredInterrupt = false;
-            this._yielded = undefined;
-            return yielded;
-          } else if (this._deferredInterrupt) {
-            this._yielded = undefined;
-            yielded();
-            continue;
+            current = failCause(this._interruptedCause);
           }
-          return Yield;
+          this.currentOpCount++;
+          const cache = this.cache;
+          if (!yielding && !cache.preventYield && cache.scheduler.shouldYield(this)) {
+            yielding = true;
+            const prev = current;
+            current = flatMap(yieldNow, () => prev);
+          }
+          current = cache.tracerContext ? cache.tracerContext(current, this) : current[evaluate](this);
+          if (current === Yield) {
+            const yielded = this._yielded;
+            if (ExitTypeId in yielded) {
+              this._deferredInterrupt = false;
+              this._yielded = undefined;
+              return yielded;
+            } else if (this._deferredInterrupt) {
+              this._yielded = undefined;
+              yielded();
+              continue;
+            }
+            return Yield;
+          }
+        } catch (error) {
+          if (!hasProperty(current, evaluate)) {
+            return exitDie(`Fiber.runLoop: Not a valid effect: ${String(current)}`);
+          }
+          current = exitDie(error);
         }
       }
-    } catch (error) {
-      if (!hasProperty(current, evaluate)) {
-        return exitDie(`Fiber.runLoop: Not a valid effect: ${String(current)}`);
-      }
-      return this.runLoop(exitDie(error));
     } finally {
       this._running = prevRunning;
       globalThis[currentFiberTypeId] = prevFiber;
@@ -2038,7 +2107,6 @@ var yieldNowWith = /* @__PURE__ */ makePrimitive({
 var yieldNow = /* @__PURE__ */ yieldNowWith(0);
 var failCauseSync = (evaluate) => suspend(() => failCause(evaluate()));
 var die = (defect) => exitDie(defect);
-var failSync = (error) => suspend(() => fail3(error()));
 var void_ = /* @__PURE__ */ succeed3(undefined);
 var try_ = (options) => {
   const evaluate = typeof options === "function" ? options : options.try;
@@ -2089,9 +2157,9 @@ var callbackOptions = /* @__PURE__ */ function() {
       if (yielded !== false)
         return yielded;
       yielded = true;
-      fiber._yielded = () => {
+      fiber.yieldWith(() => {
         resumed = true;
-      };
+      });
       if (controller === undefined && onCancel === undefined) {
         return Yield;
       }
@@ -2218,13 +2286,19 @@ var returnPayload = function() {
   return this.payload;
 };
 var continuationMarksStack = /* @__PURE__ */ (() => {
+  const limit = /* @__PURE__ */ getStackTraceLimit();
+  if (limit === 0)
+    return false;
   const marker = "~effect/Effect/stackProbe";
   const probe = {
     [marker]: function stackProbe() {
-      return new Error().stack;
+      return new Error;
     }
   };
-  return probe[marker]()?.includes("[as " + marker + "]") === true;
+  setStackTraceLimit(1);
+  const error = /* @__PURE__ */ probe[marker]();
+  setStackTraceLimit(limit);
+  return error.stack?.includes("[as " + marker + "]") === true;
 })();
 var mapCont = function(value, fiber) {
   const f = this.payload;
@@ -2243,19 +2317,22 @@ var flatMapEager = /* @__PURE__ */ dual(2, (self2, f) => {
   }
   return flatMap(self2, f);
 });
-var map2 = /* @__PURE__ */ dual(2, (self2, f) => new ContImpl(self2, mapCont, f));
-var mapEager = /* @__PURE__ */ dual(2, (self2, f) => effectIsExit(self2) ? exitMap(self2, f) : map2(self2, f));
+var map3 = /* @__PURE__ */ dual(2, (self2, f) => new ContImpl(self2, mapCont, f));
+var mapEager = /* @__PURE__ */ dual(2, (self2, f) => effectIsExit(self2) ? exitMap(self2, f) : map3(self2, f));
 var mapErrorEager = /* @__PURE__ */ dual(2, (self2, f) => effectIsExit(self2) ? exitMapError(self2, f) : mapError(self2, f));
+var mapBothEager = /* @__PURE__ */ dual(2, (self2, options) => effectIsExit(self2) ? exitMapBoth(self2, options) : mapBoth(self2, options));
 var exitIsSuccess = (self2) => self2._tag === "Success";
 var exitVoid = /* @__PURE__ */ exitSucceed(undefined);
 var exitMap = /* @__PURE__ */ dual(2, (self2, f) => self2._tag === "Success" ? exitSucceed(f(self2.value)) : self2);
 var exitMapError = /* @__PURE__ */ dual(2, (self2, f) => {
   if (self2._tag === "Success")
     return self2;
-  const error = findError(self2.cause);
-  if (isFailure2(error))
-    return self2;
-  return exitFail(f(error.success));
+  return exitFailCause(causeMap(self2.cause, f));
+});
+var exitMapBoth = /* @__PURE__ */ dual(2, (self2, options) => {
+  if (self2._tag === "Success")
+    return exitSucceed(options.onSuccess(self2.value));
+  return exitFailCause(causeMap(self2.cause, options.onFailure));
 });
 var catchCause = /* @__PURE__ */ dual(2, (self2, f) => new OnFailureImpl(self2, f.length !== 1 ? (cause) => f(cause) : f));
 var OnFailureProto = /* @__PURE__ */ makePrimitiveProto({
@@ -2267,12 +2344,12 @@ var OnFailureImpl = function(self2, f) {
   this[contE] = f;
 };
 OnFailureImpl.prototype = OnFailureProto;
-var catchCauseFilter = /* @__PURE__ */ dual(3, (self2, filter, f) => catchCause(self2, (cause) => {
-  const eb = filter(cause);
-  return isFailure2(eb) ? failCause(eb.failure) : f(eb.success, cause);
+var mapError = /* @__PURE__ */ dual(2, (self2, f) => catchCause(self2, (cause) => failCause(causeMap(cause, f))));
+var mapBoth = /* @__PURE__ */ dual(2, (self2, options) => matchCauseEffect(self2, {
+  onFailure: (cause) => failCause(causeMap(cause, options.onFailure)),
+  onSuccess: (a) => sync(() => options.onSuccess(a))
 }));
-var catch_ = /* @__PURE__ */ dual(2, (self2, f) => catchCauseFilter(self2, findError, (e) => f(e)));
-var mapError = /* @__PURE__ */ dual(2, (self2, f) => catch_(self2, (error) => failSync(() => f(error))));
+var matchCauseEffect = /* @__PURE__ */ dual(2, (self2, options) => new OnSuccessAndFailureImpl(self2, options.onSuccess.length !== 1 ? (a) => options.onSuccess(a) : options.onSuccess, options.onFailure.length !== 1 ? (cause) => options.onFailure(cause) : options.onFailure));
 var OnSuccessAndFailureProto = /* @__PURE__ */ makePrimitiveProto({
   op: "OnSuccessAndFailure",
   [evaluate]: evaluateCont
@@ -2297,7 +2374,7 @@ var exitPrimitive = /* @__PURE__ */ makePrimitive({
     return fiber.succeedWith(exit ?? exitFailCause(cause));
   }
 });
-var combineFinalizerCause = (exit_, finalizer) => exitIsSuccess(exit_) ? finalizer : catchCause(finalizer, (cause) => failCause(causeCombine(exit_.cause, cause)));
+var combineFinalizerCause = (exit_, finalizer) => exitIsSuccess(exit_) ? finalizer : catchCause(finalizer, (cause) => failCause(causeElectDefects(causeCombine(exit_.cause, cause))));
 var uninterruptible = (self2) => withFiber((fiber) => {
   if (!fiber.interruptible)
     return self2;
@@ -2418,7 +2495,7 @@ var iterateConcurrentImpl = (options) => {
                   const reasons = exit.cause.reasons.filter((reason) => reason._tag !== "Interrupt");
                   if (reasons.length > 0) {
                     const cause = causeFromReasons(reasons);
-                    terminal = exitFailCause(terminal._tag === "Failure" ? causeCombine(terminal.cause, cause) : cause);
+                    terminal = exitFailCause(terminal._tag === "Failure" ? causeElectDefects(causeCombine(terminal.cause, cause)) : cause);
                   }
                 }
               } else {
@@ -2472,15 +2549,15 @@ var forkUnsafe = (parent, effect, immediate = false, daemon = false, uninterrupt
   const parentRuntime = parent;
   const interruptible = uninterruptible === "inherit" ? parentRuntime.interruptible : !uninterruptible;
   const child = new FiberImpl(parentRuntime.context, interruptible);
+  if (!daemon) {
+    parentRuntime.children().add(child);
+    child._parent = parentRuntime;
+  }
   if (immediate) {
     child.evaluate(effect);
   } else {
     child._asyncContext = captureAsyncContext();
     parentRuntime.currentDispatcher.scheduleTask(() => child.evaluate(effect), 0);
-  }
-  if (!daemon && !child._exit) {
-    parentRuntime.children().add(child);
-    child._parent = parentRuntime;
   }
   return child;
 };
@@ -2585,7 +2662,7 @@ var logLevelColors = {
 // node_modules/effect/dist/Cause.js
 var isFailReason2 = isFailReason;
 var die2 = causeDie;
-var map3 = causeMap;
+var map4 = causeMap;
 var IllegalArgumentError2 = IllegalArgumentError;
 
 // node_modules/effect/dist/Exit.js
@@ -2719,7 +2796,7 @@ var makeUnsafe2 = (input) => {
   }
   return fromDateUnsafe(new Date(input));
 };
-var hasZone = (input) => /Z|GMT|[+-]\d{2}$|[+-]\d{2}:?\d{2}$|\]$/.test(input);
+var hasZone = (input) => /Z|GMT|[+-]\d{2}$|[+-]\d{2}:?\d{2}$|\]$/.test(input) || /z$|gmt$/i.test(input);
 var minEpochMillis = -8640000000000000 + 12 * 60 * 60 * 1000;
 var maxEpochMillis = 8640000000000000 - 14 * 60 * 60 * 1000;
 var make4 = /* @__PURE__ */ liftThrowable(makeUnsafe2);
@@ -2733,9 +2810,17 @@ var toDate = (self2) => {
   } else if (self2.adjustedEpochMilliseconds !== undefined) {
     return new Date(self2.adjustedEpochMilliseconds);
   }
-  const parts = self2.zone.format.formatToParts(self2.epochMilliseconds).filter((_) => _.type !== "literal");
+  let bc = false;
+  const parts = self2.zone.format.formatToParts(self2.epochMilliseconds).filter((_) => {
+    if (_.type === "era") {
+      bc = _.value === "BC";
+      return false;
+    }
+    return _.type !== "literal";
+  });
+  const year = Number(parts[2].value);
   const date = new Date(0);
-  date.setUTCFullYear(Number(parts[2].value), Number(parts[0].value) - 1, Number(parts[1].value));
+  date.setUTCFullYear(bc ? 1 - year : year, Number(parts[0].value) - 1, Number(parts[1].value));
   date.setUTCHours(Number(parts[3].value), Number(parts[4].value), Number(parts[5].value), parts[6]?.type === "fractionalSecond" ? Number(parts[6].value) : (self2.epochMilliseconds % 1000 + 1000) % 1000);
   self2.adjustedEpochMilliseconds = date.getTime();
   return date;
@@ -2801,9 +2886,11 @@ var fromResult2 = fromResult;
 var flatMap2 = flatMap;
 var exit2 = exit;
 var catchCause2 = catchCause;
+var mapError2 = mapError;
 var runSyncExit2 = runSyncExit;
 var mapEager2 = mapEager;
 var mapErrorEager2 = mapErrorEager;
+var mapBothEager2 = mapBothEager;
 var flatMapEager2 = flatMapEager;
 var fnUntracedEager2 = fnUntracedEager;
 
@@ -2901,6 +2988,12 @@ function resolve(ast) {
 var STRUCTURAL_ANNOTATION_KEY = "~structural";
 var SENTINELS_ANNOTATION_KEY = "~sentinels";
 var CONSTRUCTOR_ANNOTATION_KEY = "~constructor";
+var getExpected = /* @__PURE__ */ memoize((ast) => {
+  const identifier = resolve(ast)?.identifier;
+  if (typeof identifier === "string")
+    return identifier;
+  return ast.getExpected(getExpected);
+});
 
 // node_modules/effect/dist/internal/schema/parser.js
 var missing = /* @__PURE__ */ Symbol();
@@ -2915,6 +3008,10 @@ var TypeId5 = "~effect/SchemaIssue/Issue";
 function isIssue(u) {
   return hasProperty(u, TypeId5) && u[TypeId5] === TypeId5;
 }
+function hasInput(issue) {
+  return Object.hasOwn(issue, "input");
+}
+
 class IssueNodeImpl {
   [TypeId5] = TypeId5;
   constructor(input, options) {
@@ -3051,9 +3148,106 @@ function normalizeFilterOutput(ast, out, input, options) {
     if (!isReadonlyArrayNonEmpty(out)) {
       return;
     }
-    return out.length === 1 ? makeFilterIssue(out[0], input, options) : new Composite(ast, map(out, (entry) => makeFilterIssue(entry, input, options)), input, options);
+    return out.length === 1 ? makeFilterIssue(out[0], input, options) : new Composite(ast, map2(out, (entry) => makeFilterIssue(entry, input, options)), input, options);
   }
   return makeSingle(out, input, options);
+}
+var defaultLeafHook = (issue) => {
+  const message = findMessage(issue);
+  if (message !== undefined)
+    return message;
+  switch (issue._tag) {
+    case "InvalidType":
+      return getExpectedMessage(getExpected(issue.ast), issue);
+    case "InvalidValue": {
+      const expected = findExpected(issue);
+      if (expected !== undefined)
+        return getExpectedMessage(expected, issue);
+      const input = formatInput(issue);
+      return input === undefined ? "Expected a valid value" : `Invalid data ${input}`;
+    }
+    case "MissingKey":
+      return "Missing key";
+    case "UnexpectedKey": {
+      const input = formatInput(issue);
+      return input === undefined ? "Expected no excess property" : `Unexpected key with value ${input}`;
+    }
+    case "Forbidden":
+      return "Forbidden operation";
+    case "OneOf": {
+      const input = formatInput(issue);
+      return input === undefined ? "Expected exactly one member to match" : `Expected exactly one member to match the input ${input}`;
+    }
+  }
+};
+var defaultCheckHook = (issue) => findMessage(issue) ?? findMessage(issue.issue);
+function formatInput(issue) {
+  return hasInput(issue) ? format(issue.input) : undefined;
+}
+function findExpected(issue) {
+  const expected = issue.annotations?.expected;
+  return typeof expected === "string" ? expected : undefined;
+}
+function getExpectedMessage(expected, issue) {
+  const input = formatInput(issue);
+  return input === undefined ? `Expected ${expected}` : `Expected ${expected}, got ${input}`;
+}
+function getFilterMessage(issue, checkHook) {
+  const message = checkHook(issue);
+  if (message !== undefined || issue.issue._tag !== "InvalidValue")
+    return message;
+  const expected = findExpected(issue.issue);
+  return expected === undefined ? getExpectedMessage(formatCheck(issue.filter), issue) : getExpectedMessage(expected, issue.issue);
+}
+function formatCheck(check) {
+  const expected = check.annotations?.expected;
+  if (typeof expected === "string")
+    return expected;
+  switch (check._tag) {
+    case "Filter":
+      return "<filter>";
+    case "FilterGroup":
+      return check.checks.map((check) => formatCheck(check)).join(" & ");
+  }
+}
+function makeFormatterDefault() {
+  return (issue) => formatIssue(issue, "");
+}
+var defaultFormatter = /* @__PURE__ */ makeFormatterDefault();
+function formatIssue(issue, path, messageOverride) {
+  let message;
+  switch (issue._tag) {
+    case "Filter":
+      return formatIssue(issue.issue, path, messageOverride ?? getFilterMessage(issue, defaultCheckHook));
+    case "Encoding":
+      return formatIssue(issue.issue, path, messageOverride);
+    case "Pointer":
+      return formatIssue(issue.issue, path + formatPath(issue.path), messageOverride);
+    case "Composite":
+    case "AnyOf": {
+      if (issue._tag === "Composite" || issue.issues.length > 0) {
+        return issue.issues.map((issue) => formatIssue(issue, path, messageOverride)).join(`
+`);
+      }
+      message = messageOverride ?? findMessage(issue) ?? getExpectedMessage(getExpected(issue.ast), issue);
+      break;
+    }
+    default:
+      message = messageOverride ?? defaultLeafHook(issue);
+      break;
+  }
+  return path ? `${message}
+  at ${path}` : message;
+}
+function findMessage(issue) {
+  if (issue._tag === "Pointer" || issue._tag === "Composite")
+    return;
+  if (issue._tag === "Encoding")
+    return findMessage(issue.issue);
+  const annotations = issue._tag === "Filter" ? issue.filter.annotations : ("annotations" in issue) ? issue.annotations : issue.ast.annotations;
+  const message = annotations?.[issue._tag === "MissingKey" ? "messageMissingKey" : issue._tag === "UnexpectedKey" ? "messageUnexpectedKey" : "message"];
+  if (typeof message === "string")
+    return message;
 }
 
 // node_modules/effect/dist/internal/schema/cause.js
@@ -3076,6 +3270,34 @@ function getSchemaIssueOrThrow(cause, message) {
   }
   return issue;
 }
+
+// node_modules/effect/dist/encoding/Base64Url.js
+var encode2 = (input) => encode(input).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+var decode2 = (str) => {
+  const stripped = str.replace(/[\n\r]/g, "");
+  const length = stripped.length;
+  if (length % 4 === 1) {
+    return fail2(new EncodingError({
+      module: "Base64Url",
+      kind: "Decode",
+      input: stripped,
+      message: `Length should be a multiple of 4, but is ${length}`
+    }));
+  }
+  if (!/^[-_A-Z0-9]*?={0,2}$/i.test(stripped)) {
+    return fail2(new EncodingError({
+      module: "Base64Url",
+      kind: "Decode",
+      input: stripped,
+      message: "Invalid input"
+    }));
+  }
+  let sanitized = length % 4 === 2 ? `${stripped}==` : length % 4 === 3 ? `${stripped}=` : stripped;
+  sanitized = sanitized.replace(/-/g, "+").replace(/_/g, "/");
+  return decode(sanitized);
+};
+var decodeString = (str) => map(decode2(str), (_) => decoder.decode(_));
+var decoder = /* @__PURE__ */ new TextDecoder;
 
 // node_modules/effect/dist/SchemaGetter.js
 var makeGetter = (fields) => Object.assign(Object.create(Prototype), fields);
@@ -3129,6 +3351,28 @@ function Number3() {
 }
 function trim2() {
   return transform(trim);
+}
+function parseJson(options) {
+  return transformEffect((input, parseOptions) => try_2({
+    try: () => JSON.parse(input, options?.reviver),
+    catch: () => new InvalidValue({
+      expected: "a valid JSON string"
+    }, input, parseOptions)
+  }));
+}
+function stringifyJson(options) {
+  return transformEffect((input, parseOptions) => try_2({
+    try: () => {
+      const output = JSON.stringify(input, options?.replacer, options?.space);
+      if (output === undefined) {
+        throw new TypeError("Value cannot be represented as JSON");
+      }
+      return output;
+    },
+    catch: () => new InvalidValue({
+      expected: "a JSON-serializable value"
+    }, input, parseOptions)
+  }));
 }
 function encodeBase64() {
   return transform(encode);
@@ -3239,6 +3483,9 @@ var urlFromString = /* @__PURE__ */ transformEffect2({
   encode: (url) => succeed5(url.href)
 });
 var uint8ArrayFromBase64String = /* @__PURE__ */ new Transformation(/* @__PURE__ */ decodeBase64(), /* @__PURE__ */ encodeBase64());
+function fromJsonString(options) {
+  return new Transformation(parseJson(options ?? {}), stringifyJson(options));
+}
 
 // node_modules/effect/dist/SchemaAST.js
 function makeGuard(tag) {
@@ -3309,7 +3556,12 @@ var Declaration = class extends ASTNodeImpl {
     return (input, options) => {
       if (input === missing)
         return missingExit;
-      return (run ??= this.run(this.typeParameters))(input, this, options);
+      run ??= this.run(this.typeParameters);
+      try {
+        return run(input, this, options);
+      } catch (error) {
+        return die3(error);
+      }
     };
   }
   _rebuild(recur, checks, encodingChecks, run, encodingRun) {
@@ -3375,6 +3627,104 @@ var Unknown = class extends ASTNodeImpl {
   }
 };
 var unknown = /* @__PURE__ */ new Unknown;
+function formatTemplateLiteralPath(path) {
+  return typeof path === "number" ? `parts[${path}]` : path;
+}
+function isTemplateLiteralPart(ast, path, validated) {
+  if (validated.has(ast))
+    return true;
+  if (ast.encoding) {
+    throw new Error(`TemplateLiteral parts cannot have an encoding at ${formatTemplateLiteralPath(path)}`);
+  }
+  let valid;
+  switch (ast._tag) {
+    case "String":
+    case "Number":
+    case "BigInt":
+      valid = true;
+      break;
+    case "Literal":
+      valid = !ast.checks;
+      break;
+    case "TemplateLiteral": {
+      const currentPath = formatTemplateLiteralPath(path);
+      valid = !ast.checks && ast.parts.every((part, index) => isTemplateLiteralPart(part, `${currentPath}.parts[${index}]`, validated));
+      break;
+    }
+    case "Union": {
+      const currentPath = formatTemplateLiteralPath(path);
+      valid = !ast.checks && ast.types.every((part, index) => isTemplateLiteralPart(part, `${currentPath}.types[${index}]`, validated));
+      break;
+    }
+    default:
+      return false;
+  }
+  if (valid)
+    validated.add(ast);
+  return valid;
+}
+var TemplateLiteral = class extends ASTNodeImpl {
+  _tag = "TemplateLiteral";
+  parts;
+  encodedParts;
+  literals;
+  suffixLengths;
+  constructor(parts, annotations, checks, encoding, context) {
+    super(annotations, checks, encoding, context);
+    const encodedParts = [];
+    const literals = [];
+    const validated = new Set;
+    for (let index = 0;index < parts.length; index++) {
+      const part = parts[index];
+      if (!isTemplateLiteralPart(part, index, validated)) {
+        throw new Error(`Invalid TemplateLiteral part ${part._tag}`);
+      }
+      encodedParts.push(part);
+      literals.push(part._tag === "Literal" ? globalThis.String(part.literal) : undefined);
+    }
+    const suffixLengths = new Array(encodedParts.length + 1);
+    suffixLengths[encodedParts.length] = 0;
+    for (let i = encodedParts.length - 1;i >= 0; i--) {
+      suffixLengths[i] = suffixLengths[i + 1] + (literals[i]?.length ?? 0);
+    }
+    this.parts = parts;
+    this.encodedParts = encodedParts;
+    this.literals = literals;
+    this.suffixLengths = suffixLengths;
+  }
+  getParser(compile) {
+    const tuple = new Arrays(false, this.parts.map(partFromString), []);
+    const parser = compile(decodeTo(string2, tuple, templateLiteralTransformation(this)));
+    return (input, options) => {
+      if (input === missing)
+        return missingExit;
+      const result = parser(input, options);
+      if (result._tag === "Success") {
+        return sameExit;
+      }
+      return mapBothEager2(result, {
+        onSuccess: () => input,
+        onFailure: (issue) => new Composite(this, [issue], input, options)
+      });
+    };
+  }
+  getExpected() {
+    return "string";
+  }
+  matchPart(s, options) {
+    return segmentTemplateLiteralParts(this, s, options) === undefined ? undefined : s;
+  }
+};
+function templateLiteralTransformation(template) {
+  return new Transformation(transformEffect((s, options) => {
+    const segments = segmentTemplateLiteralParts(template, s, options);
+    if (segments)
+      return succeed5(segments);
+    return fail5(new InvalidValue({
+      expected: "a string matching template literal parts"
+    }, s, options));
+  }), transform((parts) => parts.join("")));
+}
 var Literal = class extends ASTNodeImpl {
   _tag = "Literal";
   literal;
@@ -3458,7 +3808,7 @@ function hasCheck(checks, id) {
   return checks.some((check) => check.annotations?.representation?.id === id || check._tag === "FilterGroup" && hasCheck(check.checks, id));
 }
 var number2 = /* @__PURE__ */ new Number4;
-var Boolean = class extends ASTNodeImpl {
+var Boolean2 = class extends ASTNodeImpl {
   _tag = "Boolean";
   getParser() {
     return fromRefinement(this, isBoolean);
@@ -3467,7 +3817,7 @@ var Boolean = class extends ASTNodeImpl {
     return "boolean";
   }
 };
-var boolean = /* @__PURE__ */ new Boolean;
+var boolean = /* @__PURE__ */ new Boolean2;
 var Arrays = class extends ASTNodeImpl {
   _tag = "Arrays";
   isMutable;
@@ -3544,7 +3894,7 @@ var Arrays = class extends ASTNodeImpl {
         input,
         len,
         tailThreshold: Math.max(elementLen, len - tailLen),
-        output: new globalThis.Array(len),
+        output: [],
         issues: undefined,
         options
       };
@@ -3641,7 +3991,7 @@ var wrapPropertyKeyIssue = (s, ast, key, exit) => {
   }
   const issue = getSchemaIssue(exit.cause);
   if (issue === undefined) {
-    return failCause2(map3(exit.cause, (issue) => new Composite(ast, [new Pointer([key], issue)], s.input, s.options)));
+    return failCause2(map4(exit.cause, (issue) => new Composite(ast, [new Pointer([key], issue)], s.input, s.options)));
   }
   const pointer = new Pointer([key], issue);
   if (s.options.errors === "all") {
@@ -3653,7 +4003,7 @@ var wrapPropertyKeyIssue = (s, ast, key, exit) => {
     return fail4(new Composite(ast, [pointer], s.input, s.options));
   }
 };
-var FINITE_PATTERN = "[+-]?\\d*\\.?\\d+(?:[Ee][+-]?\\d+)?";
+var FINITE_PATTERN = "[+-]?(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:[Ee][+-]?\\d+)?";
 function getIndexSignatureKeys(input, parameter, options = defaultParseOptions) {
   let stringKeys;
   let symbolKeys;
@@ -3892,9 +4242,15 @@ var Objects = class extends ASTNodeImpl {
     if (indexCount)
       return makeFallback();
     let fallback;
-    const resume = (state, index, pending) => {
+    const resume = (snapshot, index, pending) => {
       const property = properties[index];
       return flatMap2(exit2(pending), (exit) => {
+        const state = {
+          ...snapshot,
+          out: {
+            ...snapshot.out
+          }
+        };
         const terminal = stepProperty(state, property, exit);
         if (terminal)
           return terminal;
@@ -4023,9 +4379,6 @@ function struct(fields, checks, annotations) {
 }
 function getAST(self2) {
   return self2.ast;
-}
-function tuple(elements, checks = undefined) {
-  return new Arrays(false, elements.map((e) => e.ast), [], undefined, checks);
 }
 function union(members, options, checks) {
   return new Union(members.map(getAST), options, undefined, checks);
@@ -4399,7 +4752,15 @@ function parseUnionCandidates(ast, parser, candidates, input, options) {
       return state.out;
     return fail5(new AnyOf(ast, state.issues ?? [], input, options));
   }
-  return resumeUnion(eff, state);
+  if (effectIsExit(eff))
+    return resumeUnion(eff, state);
+  let first = true;
+  return suspend2(() => {
+    if (!first)
+      return parseUnionCandidates(ast, parser, candidates, input, options);
+    first = false;
+    return resumeUnion(eff, state);
+  });
 }
 function resumeUnion(eff, state) {
   return flatMapEager2(eff, (_) => {
@@ -4826,6 +5187,58 @@ function fromRefinement(ast, refinement) {
     return fail5(new InvalidType(ast, input, options));
   };
 }
+function segmentTemplateLiteralParts(ast, input, options) {
+  const parts = ast.encodedParts;
+  const literals = ast.literals;
+  const inputLength = input.length;
+  for (let i = 0;i < literals.length; i++) {
+    const literal = literals[i];
+    if (literal && !input.includes(literal))
+      return;
+  }
+  if (ast.suffixLengths[0] > inputLength)
+    return;
+  const out = new Array(parts.length);
+  let failures;
+  function go(i, pos) {
+    if (i === parts.length)
+      return pos === inputLength;
+    if (failures?.has(i * (inputLength + 1) + pos))
+      return false;
+    const part = parts[i];
+    if (i === parts.length - 1) {
+      const s = input.slice(pos);
+      if (part.matchPart(s, options) !== undefined) {
+        out[i] = s;
+        return true;
+      }
+    } else if (part._tag === "Literal") {
+      const s = literals[i];
+      if (input.startsWith(s, pos) && go(i + 1, pos + s.length)) {
+        out[i] = s;
+        return true;
+      }
+    } else {
+      const maximumEnd = inputLength - ast.suffixLengths[i + 1];
+      const anchor = literals[i + 1];
+      let end = anchor === undefined ? maximumEnd : input.lastIndexOf(anchor, maximumEnd);
+      while (end >= pos) {
+        const s = input.slice(pos, end);
+        if (part.matchPart(s, options) !== undefined && go(i + 1, end)) {
+          out[i] = s;
+          return true;
+        }
+        if (end === 0)
+          break;
+        end = anchor === undefined ? end - 1 : input.lastIndexOf(anchor, end - 1);
+      }
+    }
+    failures ??= new Set;
+    failures.add(i * (inputLength + 1) + pos);
+    return false;
+  }
+  return go(0, 0) ? out : undefined;
+}
 var parameterFromPropertyKey = /* @__PURE__ */ applyToSelfOrLastLinkEncodingIdempotent((ast) => {
   switch (ast._tag) {
     default:
@@ -4834,6 +5247,18 @@ var parameterFromPropertyKey = /* @__PURE__ */ applyToSelfOrLastLinkEncodingIdem
       return ast.toCodecStringTree();
     case "Union":
       return ast.recur(parameterFromPropertyKey);
+  }
+});
+var partFromString = /* @__PURE__ */ applyToSelfOrLastLinkEncodingIdempotent((ast) => {
+  switch (ast._tag) {
+    default:
+      return ast;
+    case "Number":
+    case "Literal":
+    case "BigInt":
+      return ast.toCodecStringTree();
+    case "Union":
+      return ast.recur(partFromString);
   }
 });
 var isStringFiniteRegExp = /* @__PURE__ */ new globalThis.RegExp(`^${FINITE_PATTERN}$`);
@@ -4971,6 +5396,16 @@ var unknownToStringTree = /* @__PURE__ */ new Link(StringTree, /* @__PURE__ */ p
 // node_modules/effect/dist/internal/schema/interpreter.js
 var flatMapTransformation = (result, current, f) => result === sameExit ? f(current) : flatMapEager2(result, f);
 function compileTransformation(transformation) {
+  const apply = compileTransformationUnsafe(transformation);
+  return (result, current, options) => {
+    try {
+      return apply(result, current, options);
+    } catch (error) {
+      return die3(error);
+    }
+  };
+}
+function compileTransformationUnsafe(transformation) {
   if (transformation._tag === "Middleware") {
     return (result, current, options) => {
       const transformed = result === sameExit ? transformation.decode(succeed6(toOption(current)), options) : transformation.decode(mapEager2(result, toOption), options);
@@ -4996,7 +5431,7 @@ function compileTransformation(transformation) {
   }
 }
 var fromOptionalEffect = (effect) => flatMapEager2(effect, fromOptionExit);
-var wrapEncoding = (ast, input, options, effect) => catchCause2(effect, (cause) => failCauseSync2(() => map3(cause, (issue) => new Encoding(ast, issue, input, options))));
+var wrapEncoding = (ast, input, options, effect) => catchCause2(effect, (cause) => failCauseSync2(() => map4(cause, (issue) => new Encoding(ast, issue, input, options))));
 function makeConstructorParser(descriptor, compile) {
   const transform = compileTransformation(descriptor.link.transformation);
   let sourceParser;
@@ -5046,53 +5481,57 @@ function compile(ast, compile, compileField, base, specialize) {
   let encodingParsers;
   const parseChecks = (input, options) => {
     let result = parser(input, options);
-    if (encodingChecks && !options.disableChecks) {
-      if (effectIsExit(result)) {
-        if (result._tag === "Success") {
-          const output = result === sameExit ? input : result[args];
-          if (input !== missing && output !== missing) {
-            const issues = collectIssues(encodingChecks, input, undefined, ast, options);
-            if (issues) {
-              result = fail5(new Composite(ast, issues, input, options));
+    try {
+      if (encodingChecks && !options.disableChecks) {
+        if (effectIsExit(result)) {
+          if (result._tag === "Success") {
+            const output = result === sameExit ? input : result[args];
+            if (input !== missing && output !== missing) {
+              const issues = collectIssues(encodingChecks, input, undefined, ast, options);
+              if (issues) {
+                result = fail5(new Composite(ast, issues, input, options));
+              }
             }
           }
+        } else {
+          result = flatMap2(result, (value) => {
+            if (input !== missing && value !== missing) {
+              const issues = collectIssues(encodingChecks, input, undefined, ast, options);
+              if (issues) {
+                return fail5(new Composite(ast, issues, input, options));
+              }
+            }
+            return succeed5(value);
+          });
         }
-      } else {
-        result = flatMap2(result, (value) => {
-          if (input !== missing && value !== missing) {
-            const issues = collectIssues(encodingChecks, input, undefined, ast, options);
-            if (issues) {
-              return fail5(new Composite(ast, issues, input, options));
-            }
-          }
-          return succeed5(value);
-        });
       }
-    }
-    if (checks && !options.disableChecks) {
-      if (effectIsExit(result)) {
-        if (result._tag === "Success") {
-          const value = result === sameExit ? input : result[args];
-          if (value === missing)
-            return result;
-          const issues = collectIssues(checks, value, undefined, ast, options);
-          if (issues) {
-            result = fail5(new Composite(ast, issues, value, options));
-          }
-        }
-      } else {
-        result = flatMap2(result, (value) => {
-          if (value !== missing) {
+      if (checks && !options.disableChecks) {
+        if (effectIsExit(result)) {
+          if (result._tag === "Success") {
+            const value = result === sameExit ? input : result[args];
+            if (value === missing)
+              return result;
             const issues = collectIssues(checks, value, undefined, ast, options);
             if (issues) {
-              return fail5(new Composite(ast, issues, value, options));
+              result = fail5(new Composite(ast, issues, value, options));
             }
           }
-          return succeed5(value);
-        });
+        } else {
+          result = flatMap2(result, (value) => {
+            if (value !== missing) {
+              const issues = collectIssues(checks, value, undefined, ast, options);
+              if (issues) {
+                return fail5(new Composite(ast, issues, value, options));
+              }
+            }
+            return succeed5(value);
+          });
+        }
       }
+      return result;
+    } catch (error) {
+      return die3(error);
     }
-    return result;
   };
   const parseLocal = specialize === undefined ? parseChecks : specialize(parseChecks);
   if (!links) {
@@ -5301,6 +5740,18 @@ function _is(ast) {
     return guard(input);
   };
 }
+function decodeUnknownEffect(schema, options) {
+  const parser = run(schema.ast);
+  return options === undefined ? parser : (input, overrideOptions) => parser(input, mergeParseOptions(options, overrideOptions));
+}
+function encodeUnknownEffect(schema, options) {
+  const parser = run(flip2(schema.ast));
+  return options === undefined ? parser : (input, overrideOptions) => parser(input, mergeParseOptions(options, overrideOptions));
+}
+var mergeParseOptions = (options, overrideOptions) => overrideOptions ? {
+  ...options,
+  ...overrideOptions
+} : options;
 var getValue = (value) => {
   if (value === missing) {
     return fail5(new InvalidValue);
@@ -5627,6 +6078,9 @@ function causeEquivalence(error, defect) {
 }
 
 // node_modules/effect/dist/Struct.js
+var pick = /* @__PURE__ */ dual(2, (self2, keys) => {
+  return buildStruct(self2, (k, v) => hasPropertyKey(keys, k) ? [k, v] : undefined);
+});
 var omit = /* @__PURE__ */ dual(2, (self2, keys) => {
   return buildStruct(self2, (k, v) => !hasPropertyKey(keys, k) ? [k, v] : undefined);
 });
@@ -5648,6 +6102,12 @@ function buildStruct(source, f) {
   return out;
 }
 
+// node_modules/effect/dist/internal/schemaError.js
+var SchemaErrorTypeId = "~effect/Schema/SchemaError";
+function isSchemaError(u) {
+  return hasProperty(u, SchemaErrorTypeId) && u[SchemaErrorTypeId] === SchemaErrorTypeId;
+}
+
 // node_modules/effect/dist/Schema.js
 var TypeId9 = TypeId8;
 function declareConstructor() {
@@ -5661,6 +6121,90 @@ function declare(is, annotations) {
 function annotate2(annotations) {
   return (self2) => self2.annotate(annotations);
 }
+class SchemaError extends (/* @__PURE__ */ TaggedError2("SchemaError")) {
+  [SchemaErrorTypeId] = SchemaErrorTypeId;
+  constructor(issue) {
+    const stackTraceLimit = getStackTraceLimit();
+    setStackTraceLimit(0);
+    try {
+      super({
+        issue
+      });
+    } finally {
+      setStackTraceLimit(stackTraceLimit);
+    }
+  }
+  get message() {
+    return defaultFormatter(this.issue);
+  }
+  toJSON() {
+    return {
+      _tag: this._tag,
+      message: this.message
+    };
+  }
+  [NodeInspectSymbol]() {
+    return this.toJSON();
+  }
+  toString() {
+    return `SchemaError(${this.message})`;
+  }
+}
+function isSchemaError2(u) {
+  return isSchemaError(u);
+}
+function fromIssueEffect(self2) {
+  if (effectIsExit(self2)) {
+    return fromIssueExit(self2);
+  }
+  return catchCause2(self2, (cause) => failCauseSync2(() => map4(cause, (issue) => new SchemaError(issue))));
+}
+function fromIssueExit(exit) {
+  return isSuccess3(exit) ? exit : failCause2(map4(exit.cause, (issue) => new SchemaError(issue)));
+}
+function getSchemaErrorOrThrow(cause, message) {
+  let schemaError;
+  for (const reason of cause.reasons) {
+    if (!isFailReason2(reason) || !isSchemaError2(reason.error)) {
+      throw new globalThis.Error(message, {
+        cause
+      });
+    }
+    schemaError ??= reason.error;
+  }
+  if (schemaError === undefined) {
+    throw new globalThis.Error(message, {
+      cause
+    });
+  }
+  return schemaError;
+}
+function runSchemaErrorSync(self2) {
+  const exit = runSyncExit2(self2);
+  if (isSuccess3(exit)) {
+    return exit.value;
+  }
+  throw getSchemaErrorOrThrow(exit.cause, "Sync adapter can only throw schema errors");
+}
+function decodeUnknownEffect2(schema, options) {
+  const parser = decodeUnknownEffect(schema, options);
+  return (input, options) => {
+    return fromIssueEffect(parser(input, options));
+  };
+}
+function encodeUnknownEffect2(schema, options) {
+  const parser = encodeUnknownEffect(schema, options);
+  return (input, options) => {
+    return fromIssueEffect(parser(input, options));
+  };
+}
+function encodeUnknownSync(schema, options) {
+  const parser = encodeUnknownEffect2(schema, options);
+  return (input, options) => {
+    return runSchemaErrorSync(parser(input, options));
+  };
+}
+var encodeSync = encodeUnknownSync;
 var make8 = make7;
 function isSchema(u) {
   return hasProperty(u, TypeId9) && u[TypeId9] === TypeId9;
@@ -5692,13 +6236,21 @@ function Literal2(literal) {
   });
   return out;
 }
+function templateLiteralParts(parts) {
+  return parts.map((part) => isSchema(part) ? part.ast : new Literal(part));
+}
+function TemplateLiteral2(parts) {
+  return make8(new TemplateLiteral(templateLiteralParts(parts)), {
+    parts
+  });
+}
 var Any2 = /* @__PURE__ */ make8(any);
 var Unknown2 = /* @__PURE__ */ make8(unknown);
 var Null2 = /* @__PURE__ */ make8(null_);
 var Undefined2 = /* @__PURE__ */ make8(undefined_2);
 var String5 = /* @__PURE__ */ make8(string2);
 var Number5 = /* @__PURE__ */ make8(number2);
-var Boolean2 = /* @__PURE__ */ make8(boolean);
+var Boolean3 = /* @__PURE__ */ make8(boolean);
 function makeStruct(ast, fields) {
   return make8(ast, {
     fields,
@@ -5722,18 +6274,6 @@ function StructWithRest(schema, records) {
     schema,
     records
   });
-}
-function makeTuple(ast, elements) {
-  return make8(ast, {
-    elements,
-    mapElements(f, options) {
-      const elements = f(this.elements);
-      return makeTuple(tuple(elements, options?.unsafePreserveChecks ? this.ast.checks : undefined), elements);
-    }
-  });
-}
-function Tuple(elements) {
-  return makeTuple(tuple(elements), elements);
 }
 var ArraySchema = /* @__PURE__ */ lambda((schema) => make8(new Arrays(false, [], [schema.ast]), {
   value: schema
@@ -5797,6 +6337,11 @@ function linkDecoding() {
     encode: forbiddenEncoding
   });
 }
+function encodeTo(to, transformation) {
+  return (from) => {
+    return transformation ? decodeTo2(from, transformation)(to) : decodeTo2(from)(to);
+  };
+}
 function withConstructorDefault2(defaultValue) {
   return (schema) => make8(withConstructorDefault(schema.ast, defaultValue), {
     schema
@@ -5820,6 +6365,7 @@ function toTaggedUnion(tag) {
     const isAnyOf = (keys) => (value) => keys.includes(value[tag]);
     walk(self2);
     return Object.assign(self2, {
+      tag,
       cases,
       discriminants,
       isAnyOf,
@@ -5932,16 +6478,23 @@ function isPattern2(regExp, annotations) {
   });
 }
 function isBase64(annotations) {
-  const regExp = /^([0-9a-zA-Z+/]{4})*(([0-9a-zA-Z+/]{2}==)|([0-9a-zA-Z+/]{3}=))?$/;
-  return isPattern2(regExp, {
+  const pattern = "^([0-9a-zA-Z+/]{4})*(([0-9a-zA-Z+/]{2}==)|([0-9a-zA-Z+/]{3}=))?$";
+  const regExp = /^[0-9a-zA-Z+/]*={0,2}$/;
+  return makeFilter2((s) => s.length % 4 === 0 && regExp.test(s), {
     expected: "a base64 encoded string",
     representation: {
       id: "effect/schema/isBase64",
       payload: null
     },
     toJsonSchema: () => ({
-      pattern: regExp.source
+      pattern
     }),
+    arbitraryConstraint: {
+      patterns: [{
+        source: pattern,
+        flags: ""
+      }]
+    },
     toCode: () => ({
       runtime: "Schema.isBase64()"
     }),
@@ -6149,9 +6702,11 @@ function isInt(annotations) {
       id: "effect/schema/isInt",
       payload: null
     },
-    toJsonSchema: () => [{
-      type: "integer"
-    }, true],
+    toJsonSchema: () => ({
+      type: "integer",
+      minimum: globalThis.Number.MIN_SAFE_INTEGER,
+      maximum: globalThis.Number.MAX_SAFE_INTEGER
+    }),
     toCode: () => ({
       runtime: "Schema.isInt()"
     }),
@@ -6268,6 +6823,13 @@ var URL2 = /* @__PURE__ */ instanceOf(globalThis.URL, {
   expected: "URL",
   toCodecJson: () => link()(URLString, urlFromString)
 });
+var JsonString = /* @__PURE__ */ String5.annotate({
+  expected: "a string that will be decoded as JSON",
+  contentMediaType: "application/json"
+});
+function fromJsonString2(schema, options) {
+  return JsonString.pipe(decodeTo2(schema, fromJsonString(options)));
+}
 var File2 = /* @__PURE__ */ instanceOf(globalThis.File, {
   representation: {
     id: "effect/schema/File",
@@ -6310,47 +6872,6 @@ var File2 = /* @__PURE__ */ instanceOf(globalThis.File, {
         expected: "a readable File"
       }, file, options)
     })
-  }))
-});
-var FormData2 = /* @__PURE__ */ instanceOf(globalThis.FormData, {
-  representation: {
-    id: "effect/schema/FormData",
-    payload: null
-  },
-  toCode: () => ({
-    runtime: `Schema.FormData`,
-    Type: `globalThis.FormData`
-  }),
-  expected: "FormData",
-  toCodecJson: () => link()(ArraySchema(Tuple([String5, Union2([Struct({
-    _tag: tag("String"),
-    value: String5
-  }), Struct({
-    _tag: tag("File"),
-    value: File2
-  })])])), transformEffect2({
-    decode: (e) => {
-      const out = new globalThis.FormData;
-      for (const [key, entry] of e) {
-        out.append(key, entry.value);
-      }
-      return succeed5(out);
-    },
-    encode: (formData) => {
-      return succeed5(globalThis.Array.from(formData.entries()).map(([key, value]) => {
-        if (typeof value === "string") {
-          return [key, {
-            _tag: "String",
-            value
-          }];
-        } else {
-          return [key, {
-            _tag: "File",
-            value
-          }];
-        }
-      }));
-    }
   }))
 });
 var URLSearchParams2 = /* @__PURE__ */ instanceOf(globalThis.URLSearchParams, {
@@ -6514,13 +7035,16 @@ function makeClass(Inherited, identifier, struct2, annotations, proto) {
   }
   return out;
 }
-function getClassTransformation(self2) {
-  return new Transformation(transform((input) => new self2(input, {
+function makeClassTrusted(self2, fields) {
+  return new self2(fields, {
     "~payload": {
       token: payloadToken,
-      value: input
+      value: fields
     }
-  })), passthrough());
+  });
+}
+function getClassTransformation(self2) {
+  return new Transformation(transform((input) => makeClassTrusted(self2, input)), passthrough());
 }
 function getClassTypeId(identifier) {
   return `~effect/Schema/Class/${identifier}`;
@@ -6640,8 +7164,6 @@ var WorkspaceID = String5.check(isStartingWith("wrk")).pipe(brand("Workspace.ID"
     ascending: (id) => {
       if (!id)
         return create();
-      if (!id.startsWith("wrk"))
-        throw new Error(`ID ${id} does not start with wrk`);
       return schema.make(id);
     },
     create
@@ -6723,9 +7245,78 @@ function inventory(...definitions) {
 // node_modules/@opencode/schema/dist/integration-id.js
 var IntegrationID = String5.pipe(brand("Integration.ID"), annotate2({ identifier: "Integration.ID" }));
 var IntegrationMethodID = String5.pipe(brand("Integration.MethodID"), annotate2({ identifier: "Integration.MethodID" }));
+
+// node_modules/@opencode/schema/dist/credential.js
+var ID2 = String5.pipe(brand("Credential.ID"), annotate2({ identifier: "Credential.ID" }), statics((schema) => ({ create: () => schema.make("cred_" + ascending()) })));
+var Updated = ephemeral({
+  type: "credential.updated",
+  schema: {}
+});
+var Switched = ephemeral({
+  type: "credential.switched",
+  schema: { integrationID: IntegrationID, credentialID: NullOr(ID2) }
+});
+var Event = {
+  Updated,
+  Switched,
+  Definitions: inventory(Updated, Switched)
+};
+var OAuth = Struct({
+  type: Literal2("oauth"),
+  methodID: IntegrationMethodID,
+  refresh: String5,
+  access: String5,
+  expires: NonNegativeInt,
+  metadata: optional3(Record(String5, Unknown2))
+}).annotate({ identifier: "Credential.OAuth" });
+var Key = Struct({
+  type: Literal2("key"),
+  key: String5,
+  metadata: optional3(Record(String5, Unknown2))
+}).annotate({ identifier: "Credential.Key" });
+var External = Struct({
+  type: Literal2("external"),
+  methodID: IntegrationMethodID,
+  metadata: optional3(Record(String5, Unknown2))
+}).annotate({ identifier: "Credential.External" });
+var Value = Union2([OAuth, Key, External]).pipe(toTaggedUnion("type")).annotate({ identifier: "Credential.Value" });
+var Entry = Struct({
+  id: ID2,
+  integrationID: IntegrationID,
+  label: String5,
+  active: Boolean3,
+  value: Value
+}).annotate({ identifier: "Credential.Entry" });
+var CreateInput = Struct({
+  id: optional3(ID2),
+  integrationID: IntegrationID,
+  label: optional3(String5),
+  value: Value,
+  activate: optional3(Boolean3)
+}).annotate({ identifier: "Credential.CreateInput" });
+
+// node_modules/@opencode/schema/dist/connection.js
+var Status = Struct({
+  status: Literals(["needs_auth"]),
+  message: String5,
+  url: optional3(String5)
+}).annotate({ identifier: "Connection.Status" });
+var CredentialInfo = Struct({
+  type: Literal2("credential"),
+  id: ID2,
+  label: String5,
+  method: Literals(["key", "oauth", "external"]),
+  status: optional3(Status)
+}).annotate({ identifier: "Connection.CredentialInfo" });
+var EnvInfo = Struct({
+  type: Literal2("env"),
+  name: String5,
+  status: optional3(Status)
+}).annotate({ identifier: "Connection.EnvInfo" });
+var Info2 = Union2([CredentialInfo, EnvInfo]).pipe(toTaggedUnion("type")).annotate({ identifier: "Connection.Info" });
 // node_modules/@opencode/schema/dist/form.js
 var IDSchema = String5.check(isStartingWith("frm_")).pipe(brand("Form.ID"), annotate2({ identifier: "Form.ID" }));
-var ID2 = IDSchema.pipe(statics((schema) => ({ create: (id) => schema.make(id ?? "frm_" + ascending()) })));
+var ID3 = IDSchema.pipe(statics((schema) => ({ create: (id) => schema.make(id ?? "frm_" + ascending()) })));
 var Metadata = Record(String5, Unknown2).annotate({ identifier: "Form.Metadata" });
 var Option = Struct({
   value: String5,
@@ -6735,14 +7326,14 @@ var Option = Struct({
 var When = Struct({
   key: String5,
   op: Literals(["eq", "neq"]),
-  value: Union2([String5, Number5, Boolean2])
+  value: Union2([String5, Number5, Boolean3])
 }).annotate({ identifier: "Form.When" });
 var FieldBase = {
   key: String5,
   title: String5.pipe(optional3),
   description: String5.pipe(optional3),
-  required: Boolean2.pipe(optional3),
-  hidden: Boolean2.pipe(optional3).annotate({
+  required: Boolean3.pipe(optional3),
+  hidden: Boolean3.pipe(optional3).annotate({
     description: "Skip the interactive authentication prompt and use the default unless an answer is supplied"
   }),
   when: ArraySchema(When).pipe(optional3)
@@ -6757,7 +7348,7 @@ var StringField = Struct({
   placeholder: String5.pipe(optional3),
   default: String5.pipe(optional3),
   options: ArraySchema(Option).pipe(optional3),
-  custom: Boolean2.pipe(optional3)
+  custom: Boolean3.pipe(optional3)
 }).annotate({ identifier: "Form.StringField" });
 var NumberField = Struct({
   ...FieldBase,
@@ -6776,7 +7367,7 @@ var IntegerField = Struct({
 var BooleanField = Struct({
   ...FieldBase,
   type: Literal2("boolean"),
-  default: Boolean2.pipe(optional3)
+  default: Boolean3.pipe(optional3)
 }).annotate({ identifier: "Form.BooleanField" });
 var MultiselectField = Struct({
   ...FieldBase,
@@ -6784,7 +7375,7 @@ var MultiselectField = Struct({
   options: ArraySchema(Option),
   minItems: NonNegativeInt.pipe(optional3),
   maxItems: NonNegativeInt.pipe(optional3),
-  custom: Boolean2.pipe(optional3),
+  custom: Boolean3.pipe(optional3),
   default: ArraySchema(String5).pipe(optional3)
 }).annotate({ identifier: "Form.MultiselectField" });
 var ExternalField = Struct({
@@ -6804,105 +7395,35 @@ var Field = Union2([
 ]).pipe(toTaggedUnion("type"), annotate2({ identifier: "Form.Field" }));
 var Fields = NonEmptyArray(Field).annotate({ identifier: "Form.Fields" });
 var InfoBase = {
-  id: ID2,
+  id: ID3,
   sessionID: String5,
   title: String5,
   metadata: Metadata.pipe(optional3)
 };
-var Info2 = Struct({
+var Info3 = Struct({
   ...InfoBase,
   fields: Fields
 }).annotate({ identifier: "Form.Info" });
-var Value = Union2([String5, Number5, Boolean2, ArraySchema(String5)]).annotate({
+var Value2 = Union2([String5, Number5, Boolean3, ArraySchema(String5)]).annotate({
   identifier: "Form.Value"
 });
-var Answer = Record(String5, Value).annotate({ identifier: "Form.Answer" });
+var Answer = Record(String5, Value2).annotate({ identifier: "Form.Answer" });
 var State = Union2([
   Struct({ status: Literal2("pending") }),
   Struct({ status: Literal2("answered"), answer: Answer }),
   Struct({ status: Literal2("cancelled"), message: String5.pipe(optional3) })
 ]).pipe(toTaggedUnion("status")).annotate({ identifier: "Form.State" });
 var Detail = Struct({
-  ...Info2.fields,
+  ...Info3.fields,
   state: State
 }).annotate({ identifier: "Form.Detail" });
 var Reply = Struct({
   answer: Answer
 }).annotate({ identifier: "Form.Reply" });
-var Created = ephemeral({ type: "form.created", schema: { form: Info2 } });
-var Replied = ephemeral({ type: "form.replied", schema: { id: ID2, sessionID: String5, answer: Answer } });
-var Cancelled = ephemeral({ type: "form.cancelled", schema: { id: ID2, sessionID: String5 } });
-var Event = { Created, Replied, Cancelled, Definitions: inventory(Created, Replied, Cancelled) };
-
-// node_modules/@opencode/schema/dist/credential.js
-var ID3 = String5.pipe(brand("Credential.ID"), annotate2({ identifier: "Credential.ID" }), statics((schema) => ({ create: () => schema.make("cred_" + ascending()) })));
-var Updated = ephemeral({
-  type: "credential.updated",
-  schema: {}
-});
-var Switched = ephemeral({
-  type: "credential.switched",
-  schema: { integrationID: IntegrationID, credentialID: NullOr(ID3) }
-});
-var Event2 = {
-  Updated,
-  Switched,
-  Definitions: inventory(Updated, Switched)
-};
-var OAuth = Struct({
-  type: Literal2("oauth"),
-  methodID: IntegrationMethodID,
-  refresh: String5,
-  access: String5,
-  expires: NonNegativeInt,
-  metadata: optional3(Record(String5, Unknown2))
-}).annotate({ identifier: "Credential.OAuth" });
-var Key = Struct({
-  type: Literal2("key"),
-  key: String5,
-  metadata: optional3(Record(String5, Unknown2)),
-  configuration: optional3(Answer)
-}).annotate({ identifier: "Credential.Key" });
-var External = Struct({
-  type: Literal2("external"),
-  methodID: IntegrationMethodID,
-  metadata: optional3(Record(String5, Unknown2))
-}).annotate({ identifier: "Credential.External" });
-var Value2 = Union2([OAuth, Key, External]).pipe(toTaggedUnion("type")).annotate({ identifier: "Credential.Value" });
-var Entry = Struct({
-  id: ID3,
-  integrationID: IntegrationID,
-  label: String5,
-  active: Boolean2,
-  value: Value2
-}).annotate({ identifier: "Credential.Entry" });
-var CreateInput = Struct({
-  id: optional3(ID3),
-  integrationID: IntegrationID,
-  label: optional3(String5),
-  value: Value2,
-  activate: optional3(Boolean2)
-}).annotate({ identifier: "Credential.CreateInput" });
-
-// node_modules/@opencode/schema/dist/connection.js
-var Status = Struct({
-  status: Literals(["needs_auth"]),
-  message: String5,
-  url: optional3(String5)
-}).annotate({ identifier: "Connection.Status" });
-var CredentialInfo = Struct({
-  type: Literal2("credential"),
-  id: ID3,
-  label: String5,
-  method: Literals(["key", "oauth", "external"]),
-  status: optional3(Status)
-}).annotate({ identifier: "Connection.CredentialInfo" });
-var EnvInfo = Struct({
-  type: Literal2("env"),
-  name: String5,
-  status: optional3(Status)
-}).annotate({ identifier: "Connection.EnvInfo" });
-var Info3 = Union2([CredentialInfo, EnvInfo]).pipe(toTaggedUnion("type")).annotate({ identifier: "Connection.Info" });
+var Created = ephemeral({ type: "form.created", schema: { form: Info3 } });
+var Replied = ephemeral({ type: "form.replied", schema: { id: ID3, sessionID: String5, answer: Answer } });
+var Cancelled = ephemeral({ type: "form.cancelled", schema: { id: ID3, sessionID: String5 } });
+var Event2 = { Created, Replied, Cancelled, Definitions: inventory(Created, Replied, Cancelled) };
 
 // node_modules/@opencode/schema/dist/integration.js
 var ID4 = IntegrationID;
@@ -6950,7 +7471,7 @@ var Info4 = Struct({
   name: String5,
   metadata: optional3(Record(String5, Any2)),
   methods: ArraySchema(Method),
-  connections: ArraySchema(Info3)
+  connections: ArraySchema(Info2)
 }).annotate({ identifier: "Integration.Info" });
 var AttemptID = String5.pipe(brand("Integration.AttemptID"), annotate2({ identifier: "Integration.AttemptID" }), statics((schema) => ({ create: () => schema.make("con_" + ascending()) })));
 var AttemptTime = Struct({
@@ -6991,17 +7512,22 @@ var ReasoningField = Union2([
 var MaxTokensField = Literals(["max_completion_tokens", "max_tokens"]).annotate({
   identifier: "Model.MaxTokensField"
 });
+var MediaInput = Literals(["assets", "state", "root"]).annotate({
+  identifier: "Model.MediaInput"
+});
 var CacheFormat = Literals(["anthropic", "alibaba"]).annotate({ identifier: "Model.CacheFormat" });
 var Compatibility = Struct({
   reasoningField: ReasoningField.pipe(optional3),
-  requireReasoning: Boolean2.pipe(optional3),
+  requireReasoning: Boolean3.pipe(optional3),
   maxTokensField: MaxTokensField.pipe(optional3),
-  requireFinishReason: Boolean2.pipe(optional3),
-  requireAssistantAfterTool: Boolean2.pipe(optional3),
-  supportsPromptCacheKey: Boolean2.pipe(optional3),
+  requireFinishReason: Boolean3.pipe(optional3),
+  requireAssistantAfterTool: Boolean3.pipe(optional3),
+  supportsPromptCacheKey: Boolean3.pipe(optional3),
+  streamUsage: Boolean3.pipe(optional3),
   cacheFormat: CacheFormat.pipe(optional3),
-  supportsThinkingBlockBinding: Boolean2.pipe(optional3),
-  supportsEffortUpdates: Boolean2.pipe(optional3)
+  supportsThinkingBlockBinding: Boolean3.pipe(optional3),
+  supportsEffortUpdates: Boolean3.pipe(optional3),
+  mediaInput: MediaInput.pipe(optional3)
 }).annotate({ identifier: "Model.Compatibility" });
 var ProviderCompatibility = Struct(omit(Compatibility.fields, ["supportsThinkingBlockBinding", "supportsEffortUpdates"])).annotate({ identifier: "Provider.Compatibility" });
 
@@ -7013,6 +7539,7 @@ var ID5 = String5.pipe(brand("Provider.ID"), annotate2({ identifier: "Provider.I
   google: schema.make("google"),
   googleVertex: schema.make("google-vertex"),
   githubCopilot: schema.make("github-copilot"),
+  claudeAgent: schema.make("claude-agent"),
   amazonBedrock: schema.make("amazon-bedrock"),
   azure: schema.make("azure"),
   openrouter: schema.make("openrouter"),
@@ -7028,12 +7555,18 @@ var Compaction = Union2([
   Struct({ type: Literal2("native") })
 ]).pipe(toTaggedUnion("type")).annotate({ identifier: "Provider.Compaction" });
 var Transport = Literals(["http", "websocket"]).annotate({ identifier: "Provider.Transport" });
+var CacheTTL = TemplateLiteral2([Number5, Literals(["ms", "s", "m", "h", "d"])]).check(isPattern2(/^\d+(ms|s|m|h|d)$/)).annotate({ identifier: "Provider.CacheTTL" });
+var Cache = Struct({
+  ttl: CacheTTL.pipe(optional3)
+}).annotate({ identifier: "Provider.Cache" });
 var Encoding2 = Literals(["zstd", "gzip", "none"]).annotate({ identifier: "Provider.Encoding" });
+var Timeout = Union2([Finite, Literal2(false)]).pipe(optional3);
 var Settings = StructWithRest(Struct({
-  timeout: Union2([Finite, Literal2(false)]).pipe(optional3),
-  headerTimeout: Union2([Finite, Literal2(false)]).pipe(optional3),
-  chunkTimeout: Union2([Finite, Literal2(false)]).pipe(optional3),
+  timeout: Timeout,
+  headerTimeout: Timeout,
+  chunkTimeout: Timeout,
   compaction: Compaction.pipe(optional3),
+  cache: Cache.pipe(optional3),
   transport: Transport.pipe(optional3),
   encoding: Encoding2.pipe(optional3)
 }), [Record(String5, Any2)]).annotate({ identifier: "Provider.Settings" });
@@ -7091,19 +7624,22 @@ var Ref3 = Struct({
   }
 })));
 var Family = String5.pipe(brand("Model.Family"));
-var Settings2 = StructWithRest(Struct({
-  compaction: Compaction.pipe(optional3),
-  encoding: Encoding2.pipe(optional3)
-}), [Record(String5, Any2)]).annotate({ identifier: "Model.Settings" });
+var Type = Union2([
+  Literals(["chat", "decision", "image"]),
+  String5
+]).annotate({ identifier: "Model.Type" });
+var Settings2 = StructWithRest(Struct(pick(Settings.schema.fields, ["compaction", "cache", "encoding"])), [Record(String5, Any2)]).annotate({ identifier: "Model.Settings" });
+var VariantSettings = StructWithRest(Struct(omit(Settings2.schema.fields, ["cache"])), Settings2.records).annotate({ identifier: "Model.VariantSettings" });
 var Overlays2 = {
   settings: Settings2.pipe(optional3),
   headers: Record(String5, String5).pipe(optional3),
   body: Record(String5, Any2).pipe(optional3)
 };
 var Capabilities = Struct({
-  tools: Boolean2,
+  tools: Boolean3,
   input: ArraySchema(String5),
-  output: ArraySchema(String5)
+  output: ArraySchema(String5),
+  temperature: Boolean3.pipe(optional3)
 }).annotate({ identifier: "Model.Capabilities" }).pipe(statics(() => ({
   default: () => ({ tools: true, input: ["text", "image"], output: ["text"] })
 })));
@@ -7121,13 +7657,15 @@ var Cost = Struct({
 }).annotate({ identifier: "Model.Cost" });
 var Variant = Struct({
   id: VariantID,
-  ...Overlays2
+  ...Overlays2,
+  settings: VariantSettings.pipe(optional3)
 }).annotate({ identifier: "Model.Variant" });
 var Info6 = Struct({
   id: ID6,
   modelID: ID6,
   providerID: ID5,
   canonical: ID5.pipe(optional3),
+  type: Type.pipe(optional3),
   family: Family.pipe(optional3),
   name: String5,
   compatibility: Compatibility.pipe(optional3),
@@ -7140,7 +7678,7 @@ var Info6 = Struct({
   }),
   cost: ArraySchema(Cost),
   status: Literals(["alpha", "beta", "deprecated", "active"]),
-  enabled: Boolean2,
+  enabled: Boolean3,
   limit: Struct({
     context: Int,
     input: Int.pipe(optional3),
@@ -7162,13 +7700,9 @@ var Info6 = Struct({
   })
 })));
 // node_modules/@opencode/schema/dist/session-id.js
-var SessionID = String5.check(isStartingWith("ses")).pipe(brand("SessionID"), annotate2({ identifier: "Session.ID" }), statics((schema) => {
-  const create = () => schema.make("ses_" + descending());
-  return {
-    create,
-    descending: (id) => id === undefined ? create() : schema.make(id)
-  };
-}));
+var SessionID = String5.check(isStartingWith("ses")).pipe(brand("SessionID"), annotate2({ identifier: "Session.ID" }), statics((schema) => ({
+  create: () => schema.make("ses_" + descending())
+})));
 
 // node_modules/@opencode/schema/dist/permission.js
 var ID7 = String5.check(isStartingWith("per")).pipe(brand("Permission.ID"), annotate2({ identifier: "Permission.ID" }), statics((schema) => ({ create: (id) => schema.make(id ?? "per_" + ascending()) })));
@@ -7224,7 +7758,7 @@ var Info7 = Struct({
   system: String5.pipe(optional3),
   description: String5.pipe(optional3),
   mode: Literals(["subagent", "primary", "all"]),
-  hidden: Boolean2,
+  hidden: Boolean3,
   color: Color.pipe(optional3),
   steps: PositiveInt.pipe(optional3),
   permissions: Ruleset
@@ -7247,15 +7781,64 @@ var Event7 = {
   Updated: Updated5,
   Definitions: inventory(Updated5)
 };
-// node_modules/@opencode/schema/dist/command.js
-var Updated6 = ephemeral({ type: "command.updated", schema: {} });
+// node_modules/@opencode/schema/dist/artifact.js
+var ID9 = String5.check(isStartingWith("art_")).pipe(brand("Artifact.ID"), annotate2({ identifier: "Artifact.ID" }), statics((schema) => ({
+  create: () => schema.make("art_" + ascending())
+})));
+var ProviderID = Trim.check(isNonEmpty()).pipe(brand("Artifact.ProviderID"), annotate2({ identifier: "Artifact.ProviderID" }));
+var Capability = Literals(["static", "server-code", "sqlite", "durable-objects"]).annotate({
+  identifier: "Artifact.Capability"
+});
+var Provider = Struct({
+  id: ProviderID,
+  name: String5,
+  capabilities: ArraySchema(Capability),
+  default: Boolean3
+}).annotate({ identifier: "Artifact.Provider" });
+var Time = Struct({
+  created: Finite,
+  updated: Finite
+}).annotate({ identifier: "Artifact.Time" });
 var Info8 = Struct({
+  id: ID9,
+  provider: ProviderID,
+  sessionID: SessionID.pipe(optional3),
+  title: String5,
+  entry: String5,
+  url: String5,
+  time: Time
+}).annotate({ identifier: "Artifact.Info" });
+var Content = Struct({
+  info: Info8,
+  files: Record(String5, String5)
+}).annotate({ identifier: "Artifact.Content" });
+var CreateInput2 = Struct({
+  title: String5,
+  files: Record(String5, String5),
+  entry: String5.pipe(optional3),
+  provider: ProviderID.pipe(optional3),
+  sessionID: SessionID.pipe(optional3)
+}).annotate({ identifier: "Artifact.CreateInput" });
+var UpdateInput = Struct({
+  title: String5.pipe(optional3),
+  files: Record(String5, String5),
+  entry: String5.pipe(optional3),
+  sessionID: SessionID.pipe(optional3)
+}).annotate({ identifier: "Artifact.UpdateInput" });
+var Updated6 = ephemeral({
+  type: "artifact.updated",
+  schema: {}
+});
+var Event8 = { Updated: Updated6, Definitions: inventory(Updated6) };
+// node_modules/@opencode/schema/dist/command.js
+var Updated7 = ephemeral({ type: "command.updated", schema: {} });
+var Info9 = Struct({
   name: String5,
   description: String5.pipe(optional3)
 }).annotate({ identifier: "Command.Info" });
-var Event8 = {
-  Updated: Updated6,
-  Definitions: inventory(Updated6)
+var Event9 = {
+  Updated: Updated7,
+  Definitions: inventory(Updated7)
 };
 // node_modules/@opencode/schema/dist/mcp.js
 class TimeoutConfig extends Class3("Mcp.TimeoutConfig")({
@@ -7282,8 +7865,8 @@ class LocalConfig extends Class3("Mcp.LocalConfig")({
     description: "Working directory for the MCP server process. Relative paths resolve from the workspace directory."
   }),
   environment: Record(String5, String5).pipe(optional3),
-  disabled: Boolean2.pipe(optional3),
-  codemode: Boolean2.pipe(optional3).annotate({
+  disabled: Boolean3.pipe(optional3),
+  codemode: Boolean3.pipe(optional3).annotate({
     description: "Expose this server's tools through Code Mode. Defaults to true."
   }),
   timeout: TimeoutConfig.pipe(optional3),
@@ -7308,8 +7891,8 @@ class RemoteConfig extends Class3("Mcp.RemoteConfig")({
   url: String5,
   headers: Record(String5, String5).pipe(optional3),
   oauth: Union2([OAuthConfig, Literal2(false)]).pipe(optional3),
-  disabled: Boolean2.pipe(optional3),
-  codemode: Boolean2.pipe(optional3).annotate({
+  disabled: Boolean3.pipe(optional3),
+  codemode: Boolean3.pipe(optional3).annotate({
     description: "Expose this server's tools through Code Mode. Defaults to true."
   }),
   timeout: TimeoutConfig.pipe(optional3),
@@ -7336,6 +7919,7 @@ var Status2 = Union2([Connected, Pending, Disabled, Failed, NeedsAuth]).pipe(toT
 var Server = Struct({
   name: String5,
   status: Status2,
+  title: optional3(String5),
   integrationID: optional3(IntegrationID)
 }).annotate({ identifier: "Mcp.Server" });
 var Resource = Struct({
@@ -7377,15 +7961,15 @@ var ResourceContent = Struct({
 }).annotate({ identifier: "Mcp.ResourceContent" });
 // node_modules/@opencode/schema/dist/pty.js
 var IDSchema2 = String5.check(isStartingWith("pty")).pipe(brand("PtyID"), annotate2({ identifier: "Pty.ID" }));
-var ID9 = IDSchema2.pipe(statics((schema) => {
+var ID10 = IDSchema2.pipe(statics((schema) => {
   const create = () => schema.make("pty_" + ascending());
   return {
     create,
     ascending: (id) => id === undefined ? create() : schema.make(id)
   };
 }));
-var Info9 = Struct({
-  id: ID9,
+var Info10 = Struct({
+  id: ID10,
   title: String5,
   command: String5,
   args: ArraySchema(String5),
@@ -7394,19 +7978,19 @@ var Info9 = Struct({
   pid: NonNegativeInt,
   exitCode: optional3(NonNegativeInt)
 }).annotate({ identifier: "Pty" });
-var Created2 = ephemeral({ type: "pty.created", schema: { info: Info9 } });
-var Updated7 = ephemeral({ type: "pty.updated", schema: { info: Info9 } });
-var Exited = ephemeral({ type: "pty.exited", schema: { id: ID9, exitCode: NonNegativeInt } });
-var Deleted = ephemeral({ type: "pty.deleted", schema: { id: ID9 } });
-var Event9 = { Created: Created2, Updated: Updated7, Exited, Deleted, Definitions: inventory(Created2, Updated7, Exited, Deleted) };
-var CreateInput2 = Struct({
+var Created2 = ephemeral({ type: "pty.created", schema: { info: Info10 } });
+var Updated8 = ephemeral({ type: "pty.updated", schema: { info: Info10 } });
+var Exited = ephemeral({ type: "pty.exited", schema: { id: ID10, exitCode: NonNegativeInt } });
+var Deleted = ephemeral({ type: "pty.deleted", schema: { id: ID10 } });
+var Event10 = { Created: Created2, Updated: Updated8, Exited, Deleted, Definitions: inventory(Created2, Updated8, Exited, Deleted) };
+var CreateInput3 = Struct({
   command: optional3(String5),
   args: optional3(ArraySchema(String5)),
   cwd: optional3(String5),
   title: optional3(String5),
   env: optional3(Record(String5, String5))
 });
-var UpdateInput = Struct({
+var UpdateInput2 = Struct({
   title: optional3(String5),
   size: optional3(Struct({
     rows: PositiveInt,
@@ -7414,12 +7998,12 @@ var UpdateInput = Struct({
   }))
 });
 // node_modules/@opencode/schema/dist/project.js
-var ID10 = ProjectID;
+var ID11 = ProjectID;
 var Vcs = String5.check(isPattern2(/^[a-z][a-z0-9._-]*$/u)).annotate({
   identifier: "Project.Vcs"
 });
 var Current = Struct({
-  id: ID10,
+  id: ID11,
   directory: AbsolutePath,
   canonical: AbsolutePath
 }).annotate({ identifier: "Project.Current" });
@@ -7431,31 +8015,31 @@ var Icon = Struct({
 var Commands = Struct({
   start: optional3(String5.annotate({ description: "Startup script to run when creating a new workspace (worktree)" }))
 }).annotate({ identifier: "Project.Commands" });
-var Time = Struct({
+var Time2 = Struct({
   created: NonNegativeInt,
   updated: NonNegativeInt,
   active: NonNegativeInt,
   archived: optional3(NonNegativeInt)
 }).annotate({ identifier: "Project.Time" });
-var Info10 = Struct({
-  id: ID10,
+var Info11 = Struct({
+  id: ID11,
   canonical: AbsolutePath,
   vcs: optional3(Vcs),
   name: optional3(String5),
   icon: optional3(Icon),
   commands: optional3(Commands),
-  time: Time,
+  time: Time2,
   sandboxes: ArraySchema(String5)
 }).annotate({ identifier: "Project" });
-var UpdateInput2 = Struct({
-  projectID: ID10,
+var UpdateInput3 = Struct({
+  projectID: ID11,
   canonical: optional3(AbsolutePath),
   name: optional3(String5),
   icon: optional3(Icon),
   commands: optional3(Commands)
 }).annotate({ identifier: "Project.UpdateInput" });
-var Updated8 = ephemeral({ type: "project.updated", schema: Info10.fields });
-var Event10 = { Updated: Updated8, Definitions: inventory(Updated8) };
+var Updated9 = ephemeral({ type: "project.updated", schema: Info11.fields });
+var Event11 = { Updated: Updated9, Definitions: inventory(Updated9) };
 // node_modules/@opencode/schema/dist/llm.js
 var FinishReason = Literals(["stop", "length", "tool-calls", "content-filter", "error", "unknown"]);
 // node_modules/@opencode/schema/dist/tool.js
@@ -7477,28 +8061,14 @@ var FileContent = Struct({
   mime: String5,
   name: optional2(String5)
 }).annotate({ identifier: "Tool.FileContent" });
-var Content = Union2([TextContent, FileContent]).pipe(toTaggedUnion("type")).annotate({ identifier: "Tool.Content" });
+var Content2 = Union2([TextContent, FileContent]).pipe(toTaggedUnion("type")).annotate({ identifier: "Tool.Content" });
 
 // node_modules/@opencode/schema/dist/session-metadata.js
 var SessionMetadata = Record(String5, Json2).annotate({
   identifier: "Session.Metadata"
 });
-// node_modules/@opencode/schema/dist/session-provider-context.js
-var Provenance = Struct({
-  providerID: ID5,
-  provider: String5,
-  modelID: String5,
-  route: String5,
-  protocol: String5,
-  endpoint: String5
-}).annotate({ identifier: "Session.ProviderContext.Provenance" });
-var Info11 = Struct({
-  version: Literal2(1),
-  provenance: Provenance,
-  messages: Json2
-}).annotate({ identifier: "Session.ProviderContext" });
 // node_modules/@opencode/schema/dist/skill.js
-var ID11 = String5.pipe(brand("Skill.ID"), annotate2({ identifier: "Skill.ID" }));
+var ID12 = String5.pipe(brand("Skill.ID"), annotate2({ identifier: "Skill.ID" }));
 var Name2 = String5.pipe(brand("Skill.Name"), annotate2({ identifier: "Skill.Name" }));
 var DirectorySource = Struct({
   type: tag("directory"),
@@ -7509,15 +8079,15 @@ var UrlSource = Struct({
   url: String5
 }).annotate({ identifier: "Skill.UrlSource" });
 var Info12 = Struct({
-  id: ID11,
+  id: ID12,
   name: Name2,
   description: String5.pipe(optional3),
-  autoinvoke: Boolean2.pipe(optional3),
+  autoinvoke: Boolean3.pipe(optional3),
   path: AbsolutePath,
   content: String5
 }).annotate({ identifier: "Skill.Info" });
-var Updated9 = ephemeral({ type: "skill.updated", schema: {} });
-var Event11 = { Updated: Updated9, Definitions: inventory(Updated9) };
+var Updated10 = ephemeral({ type: "skill.updated", schema: {} });
+var Event12 = { Updated: Updated10, Definitions: inventory(Updated10) };
 var EmbeddedSource = Struct({
   type: tag("embedded"),
   skill: suspend3(() => Info12)
@@ -7547,7 +8117,7 @@ var FileSource = Union2([
   Struct({ type: Literal2("inline") }),
   Struct({ type: Literal2("uri"), uri: String5 })
 ]).pipe(toTaggedUnion("type")).annotate({ identifier: "Prompt.FileSource" });
-var Base64 = String5.check(isPattern2(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u)).annotate({ identifier: "Prompt.Base64" });
+var Base64 = String5.check(makeFilter2((value) => value.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/u.test(value), isPattern2(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u).annotations)).annotate({ identifier: "Prompt.Base64" });
 var FileAttachment = Struct({
   data: Base64,
   mime: String5,
@@ -7565,12 +8135,26 @@ var FileAttachment = Struct({
     mention: input.mention
   })
 })));
+var MediaRef = String5.check(isPattern2(/^media:[0-9a-f]{64}$/)).annotate({
+  identifier: "Prompt.MediaRef"
+});
+var { data: _, ...fileAttachmentFields } = FileAttachment.fields;
+var MediaFileAttachment = Struct({
+  ...fileAttachmentFields,
+  uri: MediaRef,
+  bytes: Int.pipe(optional3),
+  width: Int.pipe(optional3),
+  height: Int.pipe(optional3)
+}).annotate({ identifier: "Prompt.MediaFileAttachment" });
+var Attachment = Union2([FileAttachment, MediaFileAttachment]).annotate({
+  identifier: "Prompt.Attachment"
+});
 var AgentAttachment = Struct({
   name: String5,
   mention: PromptMention.pipe(optional3)
 }).annotate({ identifier: "Prompt.AgentAttachment" });
 var SkillAttachment = Struct({
-  id: ID11,
+  id: ID12,
   name: Name2,
   text: String5.pipe(optional3),
   mention: PromptMention.pipe(optional3)
@@ -7591,7 +8175,7 @@ var Prompt = Struct({
 })));
 // node_modules/@opencode/schema/dist/shell.js
 var IDSchema3 = String5.check(isStartingWith("sh_")).pipe(brand("Shell.ID"), annotate2({ identifier: "Shell.ID" }));
-var ID12 = IDSchema3.pipe(statics((schema) => {
+var ID13 = IDSchema3.pipe(statics((schema) => {
   const create = () => schema.make("sh_" + ascending());
   return {
     create,
@@ -7599,7 +8183,7 @@ var ID12 = IDSchema3.pipe(statics((schema) => {
   };
 }));
 var Status3 = Literals(["running", "exited", "timeout", "killed"]);
-var Time2 = Struct({
+var Time3 = Struct({
   started: Finite.annotate({ description: "Start time in milliseconds since the Unix epoch" }),
   completed: optional3(Finite).annotate({
     description: "Completion time in milliseconds since the Unix epoch"
@@ -7607,7 +8191,7 @@ var Time2 = Struct({
 });
 var Metadata2 = Record(String5, Unknown2);
 var Info13 = Struct({
-  id: ID12,
+  id: ID13,
   status: Status3,
   command: String5,
   cwd: String5,
@@ -7617,13 +8201,13 @@ var Info13 = Struct({
   exit: optional3(Finite),
   signal: optional3(String5),
   metadata: Metadata2,
-  time: Time2
+  time: Time3
 }).annotate({ identifier: "Shell.Info" });
 var Created3 = ephemeral({ type: "shell.created", schema: { info: Info13 } });
-var Exited2 = ephemeral({ type: "shell.exited", schema: { id: ID12, exit: optional3(Finite), status: Status3 } });
-var Deleted2 = ephemeral({ type: "shell.deleted", schema: { id: ID12 } });
-var Event12 = { Created: Created3, Exited: Exited2, Deleted: Deleted2, Definitions: inventory(Created3, Exited2, Deleted2) };
-var CreateInput3 = Struct({
+var Exited2 = ephemeral({ type: "shell.exited", schema: { id: ID13, exit: optional3(Finite), status: Status3 } });
+var Deleted2 = ephemeral({ type: "shell.deleted", schema: { id: ID13 } });
+var Event13 = { Created: Created3, Exited: Exited2, Deleted: Deleted2, Definitions: inventory(Created3, Exited2, Deleted2) };
+var CreateInput4 = Struct({
   command: String5,
   cwd: optional3(String5),
   timeout: optional3(NonNegativeInt),
@@ -7637,17 +8221,18 @@ var Output = Struct({
   output: String5,
   cursor: NonNegativeInt,
   size: NonNegativeInt,
-  truncated: Boolean2
+  truncated: Boolean3
 });
 // node_modules/@opencode/schema/dist/session-error.js
 var Error5 = Struct({
   type: String5,
   message: String5,
   status: Int.check(isBetween({ minimum: 100, maximum: 599 })).pipe(optional3),
-  response: Struct({ body: String5 }).pipe(optional3)
+  response: Struct({ body: String5 }).pipe(optional3),
+  retryAfterMs: NonNegativeInt.pipe(optional3)
 }).annotate({ identifier: "Session.StructuredError" });
 // node_modules/@opencode/schema/dist/snapshot.js
-var ID13 = String5.pipe(brand("Snapshot.ID"), annotate2({ identifier: "Snapshot.ID" }));
+var ID14 = String5.pipe(brand("Snapshot.ID"), annotate2({ identifier: "Snapshot.ID" }));
 // node_modules/@opencode/schema/dist/token-usage.js
 var Info14 = Struct({
   input: Finite,
@@ -7660,17 +8245,17 @@ var Info14 = Struct({
 }).annotate({ identifier: "TokenUsage.Info" });
 
 // node_modules/@opencode/schema/dist/session-message.js
-var ID14 = String5.check(isStartingWith("msg_")).pipe(brand("Session.Message.ID"), annotate2({ identifier: "Session.Message.ID" }), statics((schema) => ({
+var ID15 = String5.check(isStartingWith("msg_")).pipe(brand("Session.Message.ID"), annotate2({ identifier: "Session.Message.ID" }), statics((schema) => ({
   create: () => schema.make("msg_" + ascending()),
   fromEvent: (eventID) => schema.make(eventID.replace(/^evt_/, "msg_"))
 })));
 var Base = {
-  id: ID14,
+  id: ID15,
   metadata: Record(String5, Unknown2).pipe(optional3),
   time: Struct({ created: DateTimeUtcFromMillis })
 };
-var ProviderState = Record(String5, Unknown2).annotate({
-  identifier: "Session.Message.ProviderState"
+var Native = Record(String5, Unknown2).annotate({
+  identifier: "Session.Message.Native"
 });
 var AgentSelected = Struct({
   ...Base,
@@ -7688,11 +8273,11 @@ var LocationSwitched = Struct({
   ...Base,
   type: tag("location-switched"),
   location: Ref,
-  projectID: ID10.pipe(optional3),
+  projectID: ID11.pipe(optional3),
   subpath: RelativePath.pipe(optional3),
   previous: Struct({
     location: Ref,
-    projectID: ID10.pipe(optional3),
+    projectID: ID11.pipe(optional3),
     subpath: RelativePath.pipe(optional3)
   }).pipe(optional3)
 }).annotate({ identifier: "Session.Message.LocationSwitched" });
@@ -7704,6 +8289,10 @@ var User = Struct({
   skills: Prompt.fields.skills,
   type: tag("user")
 }).annotate({ identifier: "Session.Message.User" });
+var MediaUser = Struct({
+  ...User.fields,
+  files: ArraySchema(Attachment).pipe(optional3)
+}).annotate({ identifier: "Session.Message.MediaUser" });
 var Synthetic = Struct({
   ...Base,
   text: String5,
@@ -7719,14 +8308,14 @@ var System = Struct({
 var Skill = Struct({
   ...Base,
   type: tag("skill"),
-  skill: ID11,
+  skill: ID12,
   name: Name2,
   text: String5
 }).annotate({ identifier: "Session.Message.Skill" });
 var Shell = Struct({
   ...Base,
   type: tag("shell"),
-  shellID: ID12,
+  shellID: ID13,
   command: String5,
   status: Status3,
   exit: Number5.pipe(optional3),
@@ -7748,14 +8337,14 @@ var ToolStateRunning = Struct({
 var ToolStateCompleted = Struct({
   status: tag("completed"),
   input: Record(String5, Unknown2),
-  content: NonEmptyArray(Content),
+  content: NonEmptyArray(Content2),
   metadata: Record(String5, Json2).pipe(optional3)
 }).annotate({ identifier: "Session.Message.ToolState.Completed" });
 var ToolStateError = Struct({
   status: tag("error"),
   input: Record(String5, Unknown2),
   error: Error5,
-  content: NonEmptyArray(Content).pipe(optional3),
+  content: NonEmptyArray(Content2).pipe(optional3),
   metadata: Record(String5, Json2).pipe(optional3)
 }).annotate({ identifier: "Session.Message.ToolState.Error" });
 var ToolState = Union2([ToolStateStreaming, ToolStateRunning, ToolStateCompleted, ToolStateError]).pipe(toTaggedUnion("status"));
@@ -7763,9 +8352,8 @@ var AssistantTool = Struct({
   type: tag("tool"),
   id: String5,
   name: String5,
-  executed: Boolean2.pipe(optional3),
-  providerState: ProviderState.pipe(optional3),
-  providerResultState: ProviderState.pipe(optional3),
+  executed: Boolean3.pipe(optional3),
+  native: Native.pipe(optional3),
   state: ToolState,
   time: Struct({
     created: DateTimeUtcFromMillis,
@@ -7776,12 +8364,12 @@ var AssistantTool = Struct({
 var AssistantText = Struct({
   type: tag("text"),
   text: String5,
-  state: ProviderState.pipe(optional3)
+  native: Native.pipe(optional3)
 }).annotate({ identifier: "Session.Message.Assistant.Text" });
 var AssistantReasoning = Struct({
   type: tag("reasoning"),
   text: String5,
-  state: ProviderState.pipe(optional3),
+  native: Native.pipe(optional3),
   time: Struct({
     created: DateTimeUtcFromMillis,
     completed: DateTimeUtcFromMillis.pipe(optional3)
@@ -7803,13 +8391,13 @@ var Assistant = Struct({
   model: Ref3,
   content: AssistantContent.pipe(ArraySchema),
   snapshot: Struct({
-    start: ID13.pipe(optional3),
-    end: ID13.pipe(optional3),
+    start: ID14.pipe(optional3),
+    end: ID14.pipe(optional3),
     files: ArraySchema(RelativePath).pipe(optional3)
   }).pipe(optional3),
   finish: FinishReason.pipe(optional3),
   rawFinish: String5.pipe(optional3),
-  providerState: ProviderState.pipe(optional3),
+  native: Native.pipe(optional3),
   cost: USD.pipe(optional3),
   tokens: Info14.pipe(optional3),
   error: Error5.pipe(optional3),
@@ -7829,18 +8417,15 @@ var CompactionRunning = Struct({
   ...CompactionBase,
   status: tag("running"),
   reason: Literals(["auto", "manual"]),
-  summary: String5,
-  recent: String5
+  summary: String5
 }).annotate({ identifier: "Session.Message.Compaction.Running" });
 var CompactionCompleted = Struct({
   ...CompactionBase,
   status: tag("completed"),
   reason: Literals(["auto", "manual"]),
   model: Ref3.pipe(optional3),
-  providerState: ProviderState.pipe(optional3),
+  native: Native.pipe(optional3),
   summary: String5,
-  recent: String5,
-  providerContext: Info11.pipe(optional3),
   ...CompactionUsage
 }).annotate({ identifier: "Session.Message.Compaction.Completed" });
 var CompactionFailed = Struct({
@@ -7870,13 +8455,27 @@ var Info15 = Union2([
   Compaction2,
   Idle
 ]).annotate({ identifier: "Session.Message.Info" });
+var MediaInfo = Union2([
+  AgentSelected,
+  ModelSelected,
+  LocationSwitched,
+  MediaUser,
+  Synthetic,
+  System,
+  Skill,
+  Shell,
+  Assistant,
+  Compaction2,
+  Idle
+]).annotate({ identifier: "Session.Message.MediaInfo" });
 // node_modules/@opencode/schema/dist/file-diff.js
 var Info16 = Struct({
   file: String5,
   patch: String5,
   additions: NonNegativeInt,
   deletions: NonNegativeInt,
-  status: Literals(["added", "deleted", "modified"])
+  status: Literals(["added", "deleted", "modified"]),
+  more: Literal2(true).pipe(optional3)
 }).annotate({ identifier: "FileDiff.Info" });
 var LegacyInfo = Struct({
   file: String5.pipe(optional3),
@@ -7888,9 +8487,9 @@ var LegacyInfo = Struct({
 
 // node_modules/@opencode/schema/dist/session-revert.js
 var Revert = Struct({
-  messageID: ID14,
+  messageID: ID15,
   partID: String5.pipe(optional3),
-  snapshot: ID13.pipe(optional3),
+  snapshot: ID14.pipe(optional3),
   files: ArraySchema(Info16).pipe(optional3)
 }).annotate({ identifier: "Session.Revert" });
 var FileDiffV1 = Struct({
@@ -7901,7 +8500,7 @@ var FileDiffV1 = Struct({
   patch: String5
 });
 var RevertV1 = Struct({
-  messageID: ID14,
+  messageID: ID15,
   partID: String5.pipe(optional3),
   snapshot: String5.pipe(optional3),
   diff: String5.pipe(optional3),
@@ -7928,7 +8527,7 @@ var PersistedRevert = Union2([PersistedCurrent, PersistedLegacy]).pipe(toTaggedU
     return Revert.make({
       messageID: persisted.revert.messageID,
       partID: persisted.revert.partID,
-      snapshot: persisted.revert.snapshot ? ID13.make(persisted.revert.snapshot) : undefined,
+      snapshot: persisted.revert.snapshot ? ID14.make(persisted.revert.snapshot) : undefined,
       files: persisted.revert.files?.map((file) => ({
         file: file.path,
         status: file.status,
@@ -7961,7 +8560,7 @@ var Info17 = Struct({
 }).annotate({ identifier: "InstructionEntry.Info" });
 var Snapshot = ArraySchema(Struct({
   ...Info17.fields,
-  removed: Boolean2
+  removed: Boolean3
 })).annotate({ identifier: "InstructionEntry.Snapshot" });
 var MaxValueBytes = 256 * 1024;
 
@@ -7977,6 +8576,10 @@ var UserPayload = Struct({
   ...Prompt.fields,
   metadata: Record(String5, Unknown2).pipe(optional3)
 }).annotate({ identifier: "Session.Inbox.UserPayload" });
+var MediaUserPayload = Struct({
+  ...UserPayload.fields,
+  files: ArraySchema(Attachment).pipe(optional3)
+}).annotate({ identifier: "Session.Inbox.MediaUserPayload" });
 var SyntheticPayload = Struct({
   text: String5,
   description: String5.pipe(optional3),
@@ -7985,7 +8588,7 @@ var SyntheticPayload = Struct({
 var CompactionPayload = Struct({}).annotate({ identifier: "Session.Inbox.CompactionPayload" });
 var MovePayload = Struct({
   location: Ref,
-  projectID: ID10,
+  projectID: ID11,
   subpath: RelativePath.pipe(optional3)
 }).annotate({ identifier: "Session.Inbox.MovePayload" });
 var UserItem = Struct({ type: tag("user"), payload: UserPayload, delivery: Delivery });
@@ -7998,11 +8601,14 @@ var CompactionItem = Struct({
 var MoveItem = Struct({ type: tag("move"), payload: MovePayload, delivery: Delivery });
 var Item = Union2([UserItem, SyntheticItem, CompactionItem, MoveItem]).pipe(toTaggedUnion("type"), annotate2({ identifier: "Session.Inbox.Item" }));
 var Enqueued = {
-  id: ID14,
+  id: ID15,
   sessionID: SessionID,
   time: Struct({ created: DateTimeUtcFromMillis })
 };
 var User2 = Struct({ ...Enqueued, ...UserItem.fields }).annotate({ identifier: "Session.Inbox.User" });
+var MediaUser2 = Struct({ ...User2.fields, payload: MediaUserPayload }).annotate({
+  identifier: "Session.Inbox.MediaUser"
+});
 var Synthetic2 = Struct({ ...Enqueued, ...SyntheticItem.fields }).annotate({
   identifier: "Session.Inbox.Synthetic"
 });
@@ -8011,20 +8617,14 @@ var Compaction3 = Struct({ ...Enqueued, ...CompactionItem.fields }).annotate({
 });
 var Move = Struct({ ...Enqueued, ...MoveItem.fields }).annotate({ identifier: "Session.Inbox.Move" });
 var Info18 = Union2([User2, Synthetic2, Compaction3, Move]).pipe(toTaggedUnion("type"), annotate2({ identifier: "Session.Inbox.Info" }));
+var MediaInfo2 = Union2([MediaUser2, Synthetic2, Compaction3, Move]).pipe(toTaggedUnion("type"), annotate2({ identifier: "Session.Inbox.MediaInfo" }));
 // node_modules/@opencode/schema/dist/session-fork.js
 var Boundary = Union2([
-  Struct({ type: Literal2("before"), messageID: ID14 }),
-  Struct({ type: Literal2("through"), messageID: ID14 })
+  Struct({ type: Literal2("before"), messageID: ID15 }),
+  Struct({ type: Literal2("through"), messageID: ID15 })
 ]).annotate({ identifier: "Session.ForkBoundary" });
 
 // node_modules/@opencode/schema/dist/session-event.js
-var Source3 = Struct({
-  start: NonNegativeInt,
-  end: NonNegativeInt,
-  text: String5
-}).annotate({
-  identifier: "Session.Event.Source"
-});
 var Base2 = {
   sessionID: SessionID
 };
@@ -8039,7 +8639,7 @@ var Created4 = durable({
   ...options,
   schema: {
     ...Base2,
-    projectID: ID10,
+    projectID: ID11,
     location: Ref,
     subpath: RelativePath.pipe(optional3),
     parentID: SessionID.pipe(optional3),
@@ -8110,12 +8710,22 @@ var Viewed = durable({
     idle: Finite
   }
 });
+var Archived = durable({
+  type: "session.archived",
+  ...options,
+  schema: Base2
+});
+var Unarchived = durable({
+  type: "session.unarchived",
+  ...options,
+  schema: Base2
+});
 var MessageContentUpdated = durable({
   type: "session.message.content.updated",
   ...options,
   schema: {
     ...Base2,
-    messageID: ID14,
+    messageID: ID15,
     content: ArraySchema(AssistantContentEncoded)
   }
 });
@@ -8161,7 +8771,7 @@ var Forked = durable({
 });
 var InboxRef = {
   ...Base2,
-  inboxID: ID14
+  inboxID: ID15
 };
 var InboxDelivered = durable({
   type: "session.inbox.delivered",
@@ -8230,7 +8840,7 @@ var Skill2;
     ...options,
     schema: {
       ...Base2,
-      id: ID11,
+      id: ID12,
       name: Name2,
       text: String5
     }
@@ -8263,10 +8873,10 @@ var Step;
     ...options,
     schema: {
       ...Base2,
-      assistantMessageID: ID14,
+      assistantMessageID: ID15,
       agent: ID8,
       model: Ref3,
-      snapshot: ID13.pipe(optional3),
+      snapshot: ID14.pipe(optional3),
       started: NonNegativeInt
     }
   });
@@ -8275,7 +8885,7 @@ var Step;
     ...options,
     schema: {
       ...Base2,
-      assistantMessageID: ID14
+      assistantMessageID: ID15
     }
   });
   Step.Ended = durable({
@@ -8283,13 +8893,13 @@ var Step;
     ...options,
     schema: {
       ...Base2,
-      assistantMessageID: ID14,
+      assistantMessageID: ID15,
       finish: FinishReason,
       rawFinish: String5.pipe(optional3),
-      providerState: ProviderState.pipe(optional3),
+      native: Native.pipe(optional3),
       cost: USD,
       tokens: Info14,
-      snapshot: ID13.pipe(optional3),
+      snapshot: ID14.pipe(optional3),
       files: ArraySchema(RelativePath).pipe(optional3)
     }
   });
@@ -8298,14 +8908,14 @@ var Step;
     ...options,
     schema: {
       ...Base2,
-      assistantMessageID: ID14,
+      assistantMessageID: ID15,
       error: Error5,
       finish: Literals(["content-filter"]).pipe(optional3),
       rawFinish: String5.pipe(optional3),
-      providerState: ProviderState.pipe(optional3),
+      native: Native.pipe(optional3),
       cost: USD.pipe(optional3),
       tokens: Info14.pipe(optional3),
-      snapshot: ID13.pipe(optional3),
+      snapshot: ID14.pipe(optional3),
       files: ArraySchema(RelativePath).pipe(optional3)
     }
   });
@@ -8317,7 +8927,7 @@ var Text;
     ...options,
     schema: {
       ...Base2,
-      assistantMessageID: ID14,
+      assistantMessageID: ID15,
       ordinal: NonNegativeInt
     }
   });
@@ -8325,7 +8935,7 @@ var Text;
     type: "session.text.delta",
     schema: {
       ...Base2,
-      assistantMessageID: ID14,
+      assistantMessageID: ID15,
       ordinal: NonNegativeInt,
       delta: String5
     }
@@ -8335,10 +8945,10 @@ var Text;
     ...options,
     schema: {
       ...Base2,
-      assistantMessageID: ID14,
+      assistantMessageID: ID15,
       ordinal: NonNegativeInt,
       text: String5,
-      state: ProviderState.pipe(optional3)
+      native: Native.pipe(optional3)
     }
   });
 })(Text || (Text = {}));
@@ -8349,16 +8959,16 @@ var Reasoning;
     ...options,
     schema: {
       ...Base2,
-      assistantMessageID: ID14,
+      assistantMessageID: ID15,
       ordinal: NonNegativeInt,
-      state: ProviderState.pipe(optional3)
+      native: Native.pipe(optional3)
     }
   });
   Reasoning.Delta = ephemeral({
     type: "session.reasoning.delta",
     schema: {
       ...Base2,
-      assistantMessageID: ID14,
+      assistantMessageID: ID15,
       ordinal: NonNegativeInt,
       delta: String5
     }
@@ -8368,10 +8978,10 @@ var Reasoning;
     ...options,
     schema: {
       ...Base2,
-      assistantMessageID: ID14,
+      assistantMessageID: ID15,
       ordinal: NonNegativeInt,
       text: String5,
-      state: ProviderState.pipe(optional3)
+      native: Native.pipe(optional3)
     }
   });
 })(Reasoning || (Reasoning = {}));
@@ -8379,7 +8989,7 @@ var Tool;
 (function(Tool) {
   const ToolBase = {
     ...Base2,
-    assistantMessageID: ID14,
+    assistantMessageID: ID15,
     id: String5
   };
   let Input;
@@ -8414,8 +9024,8 @@ var Tool;
     schema: {
       ...ToolBase,
       input: Record(String5, Unknown2),
-      executed: Boolean2,
-      state: ProviderState.pipe(optional3)
+      executed: Boolean3,
+      native: Native.pipe(optional3)
     }
   });
   Tool.Progress = ephemeral({
@@ -8433,10 +9043,10 @@ var Tool;
     },
     schema: {
       ...ToolBase,
-      content: NonEmptyArray(Content),
+      content: NonEmptyArray(Content2),
       metadata: Record(String5, Json2).pipe(optional3),
-      executed: Boolean2,
-      resultState: ProviderState.pipe(optional3)
+      executed: Boolean3,
+      native: Native.pipe(optional3)
     }
   });
   Tool.Failed = durable({
@@ -8448,10 +9058,10 @@ var Tool;
     schema: {
       ...ToolBase,
       error: Error5,
-      content: NonEmptyArray(Content).pipe(optional3),
+      content: NonEmptyArray(Content2).pipe(optional3),
       metadata: Record(String5, Json2).pipe(optional3),
-      executed: Boolean2,
-      resultState: ProviderState.pipe(optional3)
+      executed: Boolean3,
+      native: Native.pipe(optional3)
     }
   });
 })(Tool || (Tool = {}));
@@ -8460,7 +9070,7 @@ var RetryScheduled = durable({
   ...options,
   schema: {
     ...Base2,
-    assistantMessageID: ID14,
+    assistantMessageID: ID15,
     attempt: PositiveInt,
     at: NonNegativeInt,
     error: Error5
@@ -8474,8 +9084,7 @@ var Compaction4;
     schema: {
       ...Base2,
       reason: Literals(["auto", "manual"]),
-      recent: String5,
-      inputID: ID14.pipe(optional3)
+      inputID: ID15.pipe(optional3)
     }
   });
   Compaction.Delta = ephemeral({
@@ -8492,10 +9101,8 @@ var Compaction4;
       ...Base2,
       reason: Compaction.Started.data.fields.reason,
       model: CompactionCompleted.fields.model,
-      providerState: CompactionCompleted.fields.providerState,
-      providerContext: CompactionCompleted.fields.providerContext,
+      native: CompactionCompleted.fields.native,
       text: String5,
-      recent: String5,
       cost: CompactionCompleted.fields.cost,
       tokens: CompactionCompleted.fields.tokens
     }
@@ -8507,7 +9114,7 @@ var Compaction4;
       ...Base2,
       reason: Compaction.Started.data.fields.reason,
       error: Error5,
-      inputID: ID14.pipe(optional3),
+      inputID: ID15.pipe(optional3),
       cost: CompactionFailed.fields.cost,
       tokens: CompactionFailed.fields.tokens
     }
@@ -8524,27 +9131,27 @@ var RevertEvent;
   RevertEvent.Committed = durable({
     type: "session.revert.committed",
     ...options,
-    schema: { ...Base2, to: ID14 }
+    schema: { ...Base2, to: ID15 }
   });
 })(RevertEvent || (RevertEvent = {}));
-var Definitions = inventory(Created4, AgentSelected2, ModelSelected2, Moved, Renamed, MetadataUpdated, Permissions, Viewed, UsageUpdated, Deleted3, Forked, InboxDelivered, InboxEnqueued, InboxCancelled, InboxDeliveryChanged, Execution.Started, Execution.Succeeded, Execution.Failed, Execution.Interrupted, InstructionsUpdated, Synthetic3, Skill2.Activated, Shell2.Started, Shell2.Ended, Step.Started, Step.Streamed, Step.Ended, Step.Failed, Text.Started, Text.Delta, Text.Ended, Reasoning.Started, Reasoning.Delta, Reasoning.Ended, Tool.Input.Started, Tool.Input.Delta, Tool.Input.Ended, Tool.Called, Tool.Progress, Tool.Success, Tool.Failed, RetryScheduled, Compaction4.Started, Compaction4.Delta, Compaction4.Ended, Compaction4.Failed, RevertEvent.Staged, RevertEvent.Cleared, RevertEvent.Committed);
+var Definitions = inventory(Created4, AgentSelected2, ModelSelected2, Moved, Renamed, MetadataUpdated, Permissions, Viewed, Archived, Unarchived, UsageUpdated, Deleted3, Forked, InboxDelivered, InboxEnqueued, InboxCancelled, InboxDeliveryChanged, Execution.Started, Execution.Succeeded, Execution.Failed, Execution.Interrupted, InstructionsUpdated, Synthetic3, Skill2.Activated, Shell2.Started, Shell2.Ended, Step.Started, Step.Streamed, Step.Ended, Step.Failed, Text.Started, Text.Delta, Text.Ended, Reasoning.Started, Reasoning.Delta, Reasoning.Ended, Tool.Input.Started, Tool.Input.Delta, Tool.Input.Ended, Tool.Called, Tool.Progress, Tool.Success, Tool.Failed, RetryScheduled, Compaction4.Started, Compaction4.Delta, Compaction4.Ended, Compaction4.Failed, RevertEvent.Staged, RevertEvent.Cleared, RevertEvent.Committed);
 var DurableDefinitions = inventory(...Definitions.filter((definition) => definition.durability === "durable"), UsageRecorded, MessageContentUpdated);
 var EphemeralDefinitions = inventory(...Definitions.filter((definition) => definition.durability === "ephemeral"));
-var Durable = Union2(DurableDefinitions, { mode: "oneOf" }).pipe(toTaggedUnion("type")).annotate({ identifier: "Session.Event.Durable" });
+var Durable = Union2(DurableDefinitions, { mode: "oneOf" }).annotate({ identifier: "Session.Event.Durable" }).pipe(toTaggedUnion("type"));
 var All = Union2([Durable, ...EphemeralDefinitions], { mode: "oneOf" }).pipe(toTaggedUnion("type"));
 
 // node_modules/@opencode/schema/dist/session.js
-var ID15 = SessionID;
+var ID16 = SessionID;
 var Metadata3 = SessionMetadata;
 var ForkBoundary = Boundary;
 var Info19 = Struct({
-  id: ID15,
-  parentID: ID15.pipe(optional3),
+  id: ID16,
+  parentID: ID16.pipe(optional3),
   fork: Struct({
-    sessionID: ID15,
+    sessionID: ID16,
     boundary: ForkBoundary
   }).pipe(optional3),
-  projectID: ID10,
+  projectID: ID11,
   agent: ID8.pipe(optional3),
   model: Ref3.pipe(optional3),
   cost: USD,
@@ -8553,6 +9160,7 @@ var Info19 = Struct({
   time: Struct({
     created: DateTimeUtcFromMillis,
     updated: DateTimeUtcFromMillis,
+    busy: DateTimeUtcFromMillis.pipe(optional3),
     idle: DateTimeUtcFromMillis.pipe(optional3),
     viewed: DateTimeUtcFromMillis.pipe(optional3),
     archived: DateTimeUtcFromMillis.pipe(optional3)
@@ -8565,15 +9173,67 @@ var Info19 = Struct({
   revert: Revert.pipe(optional3)
 }).annotate({ identifier: "Session.Info" });
 var ListAnchor = Struct({
-  id: ID15,
+  id: ID16,
   time: Finite,
   direction: Literals(["previous", "next"])
 }).annotate({ identifier: "Session.ListAnchor" });
+var ListFilterFields = {
+  order: Literals(["asc", "desc"]).pipe(optional2).annotate({
+    description: "Session order for the first page. Use desc for newest first or asc for oldest first."
+  }),
+  search: String5.pipe(optional2),
+  parentID: Union2([
+    ID16,
+    Null2.pipe(encodeTo(Literal2("null"), {
+      decode: transform(() => null),
+      encode: transform(() => "null")
+    }))
+  ]).annotate({ description: "Filter by parent session. Use null to return only root sessions." }).pipe(optional2),
+  archived: Literals(["true", "false"]).pipe(decodeTo2(Boolean3, {
+    decode: transform((value) => value === "true"),
+    encode: transform((value) => value ? "true" : "false")
+  })).annotate({
+    description: "Filter by archive state. Use true to return only archived sessions or false to exclude them. Omit to include both."
+  }).pipe(optional2)
+};
+var ListFilter = Struct({
+  ...ListFilterFields,
+  directory: AbsolutePath.pipe(optional2),
+  project: ID11.pipe(optional2),
+  subpath: RelativePath.pipe(optional2)
+}).annotate({ identifier: "Session.ListFilter" });
+var ListCursorInput = Union2([
+  Struct({ ...ListFilterFields, directory: AbsolutePath, anchor: ListAnchor }),
+  Struct({
+    ...ListFilterFields,
+    project: ID11,
+    subpath: RelativePath.pipe(optional2),
+    anchor: ListAnchor
+  }),
+  Struct({ ...ListFilterFields, anchor: ListAnchor })
+]);
+var ListCursorJson = fromJsonString2(ListCursorInput);
+var encodeListCursor = encodeSync(ListCursorJson);
+var decodeListCursor = decodeUnknownEffect2(ListCursorJson);
+var ListCursor = String5.pipe(brand("SessionsCursor"), annotate2({
+  identifier: "SessionsCursor",
+  description: "Opaque pagination cursor returned as cursor.previous or cursor.next in the previous response."
+}), statics((schema) => {
+  const make = make6(schema);
+  return {
+    make: (input) => make(encode2(encodeListCursor(input))),
+    parse: (input) => suspend2(() => {
+      const result = decodeString(input);
+      return isFailure2(result) ? fail5("Invalid cursor") : decodeListCursor(result.success).pipe(mapError2(() => "Invalid cursor"));
+    })
+  };
+}));
 
 // node_modules/@opencode/schema/dist/persistent-pty.js
 var Info20 = Struct({
-  ...Info9.fields,
-  sessionID: ID15,
+  ...Info10.fields,
+  sessionID: ID16,
+  userTitle: NullOr(String5),
   foregroundProcess: NullOr(String5),
   size: Struct({ cols: PositiveInt, rows: PositiveInt }),
   output: Struct({ head: NonNegativeInt, tail: NonNegativeInt })
@@ -8584,7 +9244,7 @@ var Handoff = Struct({
   ticket: String5,
   expiresAt: Number5
 }).annotate({ identifier: "PersistentPty.Handoff" });
-var CreateInput4 = Struct({
+var CreateInput5 = Struct({
   command: optional3(String5),
   args: ArraySchema(String5),
   cwd: optional3(String5),
@@ -8592,9 +9252,10 @@ var CreateInput4 = Struct({
   env: Record(String5, String5),
   size: optional3(Struct({ cols: PositiveInt, rows: PositiveInt }))
 }).annotate({ identifier: "PersistentPty.CreateInput" });
-var UpdateInput3 = Struct({
+var UpdateInput4 = Struct({
   attachmentID: optional3(String5),
-  size: Struct({ cols: PositiveInt, rows: PositiveInt })
+  size: optional3(Struct({ cols: PositiveInt, rows: PositiveInt })),
+  title: optional3(NullOr(String5))
 }).annotate({ identifier: "PersistentPty.UpdateInput" });
 var Snapshot2 = Struct({
   info: Info20,
@@ -8606,7 +9267,7 @@ var ReadLines = PositiveInt.check(isLessThanOrEqualTo3(65535)).annotate({
   identifier: "PersistentPty.ReadLines"
 });
 var ReadResult = Struct({
-  ptyID: ID9,
+  ptyID: ID10,
   title: String5,
   cwd: String5,
   foregroundProcess: NullOr(String5),
@@ -8617,32 +9278,33 @@ var ReadResult = Struct({
     cursor: Snapshot2.fields.cursor
   })
 }).annotate({ identifier: "PersistentPty.ReadResult" });
-var Added = ephemeral({ type: "persistent-pty.added", schema: { sessionID: ID15, terminal: Info20 } });
-var Removed2 = ephemeral({ type: "persistent-pty.removed", schema: { sessionID: ID15, ptyID: ID9 } });
-var Event13 = { Added, Removed: Removed2, Definitions: inventory(Added, Removed2) };
+var Added = ephemeral({ type: "persistent-pty.added", schema: { sessionID: ID16, terminal: Info20 } });
+var Removed2 = ephemeral({ type: "persistent-pty.removed", schema: { sessionID: ID16, ptyID: ID10 } });
+var Updated11 = ephemeral({ type: "persistent-pty.updated", schema: { sessionID: ID16, terminal: Info20 } });
+var Event14 = { Added, Removed: Removed2, Updated: Updated11, Definitions: inventory(Added, Removed2, Updated11) };
 // node_modules/@opencode/schema/dist/reference.js
-var Updated10 = ephemeral({ type: "reference.updated", schema: {} });
-var Event14 = { Updated: Updated10, Definitions: inventory(Updated10) };
+var Updated12 = ephemeral({ type: "reference.updated", schema: {} });
+var Event15 = { Updated: Updated12, Definitions: inventory(Updated12) };
 var LocalSource = Struct({
   type: Literal2("local"),
   path: AbsolutePath,
   description: String5.pipe(optional3),
-  hidden: Boolean2.pipe(optional3)
+  hidden: Boolean3.pipe(optional3)
 }).annotate({ identifier: "Reference.LocalSource" });
 var GitSource = Struct({
   type: Literal2("git"),
   repository: String5,
   branch: String5.pipe(optional3),
   description: String5.pipe(optional3),
-  hidden: Boolean2.pipe(optional3)
+  hidden: Boolean3.pipe(optional3)
 }).annotate({ identifier: "Reference.GitSource" });
-var Source4 = Union2([LocalSource, GitSource]).pipe(toTaggedUnion("type")).annotate({ identifier: "Reference.Source" });
+var Source3 = Union2([LocalSource, GitSource]).pipe(toTaggedUnion("type")).annotate({ identifier: "Reference.Source" });
 var Info21 = Struct({
   name: String5,
   path: AbsolutePath,
   description: String5.pipe(optional3),
-  hidden: Boolean2.pipe(optional3),
-  source: Source4
+  hidden: Boolean3.pipe(optional3),
+  source: Source3
 }).annotate({ identifier: "Reference.Info" });
 // node_modules/@opencode/schema/dist/vcs.js
 var Branch = Struct({
@@ -8660,6 +9322,7 @@ var Base3 = Struct({
   source: Literals(["reflog", "default"])
 }).annotate({ identifier: "Vcs.Base" });
 var Mode = Literals(["working", "branch", "committed"]).annotate({ identifier: "Vcs.Mode" });
+var Untracked = Literals(["files", "folders"]).annotate({ identifier: "Vcs.Untracked" });
 var FileStatus = Struct({
   file: String5,
   additions: NonNegativeInt,
@@ -8667,14 +9330,14 @@ var FileStatus = Struct({
   status: Literals(["added", "deleted", "modified"])
 }).annotate({ identifier: "Vcs.FileStatus" });
 // node_modules/@opencode/schema/dist/websearch.js
-var ID16 = String5.pipe(brand("WebSearch.ID"), annotate2({ identifier: "WebSearch.ID" }));
-var Provider = Struct({
-  id: ID16,
+var ID17 = String5.pipe(brand("WebSearch.ID"), annotate2({ identifier: "WebSearch.ID" }));
+var Provider2 = Struct({
+  id: ID17,
   name: String5
 }).annotate({ identifier: "WebSearch.Provider" });
 var Input = Struct({
   query: String5,
-  providerID: ID16.pipe(optional3)
+  providerID: ID17.pipe(optional3)
 }).annotate({ identifier: "WebSearch.Input" });
 var Result = Struct({
   url: String5,
@@ -8688,19 +9351,19 @@ var Result = Struct({
 }).annotate({ identifier: "WebSearch.Result" });
 
 class Response extends Class3("WebSearch.Response")({
-  providerID: ID16,
+  providerID: ID17,
   results: ArraySchema(Result)
 }) {
 }
-var Updated11 = ephemeral({
+var Updated13 = ephemeral({
   type: "websearch.updated",
   schema: {}
 });
-var Event15 = { Updated: Updated11, Definitions: inventory(Updated11) };
+var Event16 = { Updated: Updated13, Definitions: inventory(Updated13) };
 // node_modules/@opencode/schema/dist/worktree.js
 var StrategyID = Trim.pipe(check(isNonEmpty()), brand("Worktree.StrategyID"));
-var CreateInput5 = Struct({
-  projectID: ID10,
+var CreateInput6 = Struct({
+  projectID: ID11,
   from: optional3(AbsolutePath),
   branch: optional3(Trim.pipe(check(isNonEmpty()))),
   directory: optional3(AbsolutePath).annotate({
@@ -8709,9 +9372,9 @@ var CreateInput5 = Struct({
   name: optional3(String5)
 }).annotate({ identifier: "Worktree.CreateInput" });
 var RemoveInput = Struct({
-  projectID: ID10,
+  projectID: ID11,
   directory: AbsolutePath,
-  force: Boolean2
+  force: Boolean3
 }).annotate({ identifier: "Worktree.RemoveInput" });
 var Info23 = Struct({
   directory: AbsolutePath
@@ -8727,25 +9390,25 @@ var ListEntry = Struct({
 
 class OperationError extends TaggedError3()("Worktree.OperationError", {
   message: String5,
-  forceRequired: optional3(Boolean2)
+  forceRequired: optional3(Boolean3)
 }) {
 }
 var List = ArraySchema(Directory).annotate({ identifier: "Worktree.List" });
-var Updated12 = ephemeral({
+var Updated14 = ephemeral({
   type: "worktree.updated",
-  schema: { projectID: ID10 }
+  schema: { projectID: ID11 }
 });
 var Resolved = durable({
   type: "worktree.resolved",
   durable: { aggregate: "projectID", version: 1 },
   schema: {
-    projectID: ID10,
+    projectID: ID11,
     directory: AbsolutePath,
-    previous: ID10,
-    adopted: optional3(ArraySchema(ID10))
+    previous: ID11,
+    adopted: optional3(ArraySchema(ID11))
   }
 });
-var Event16 = { Updated: Updated12, Resolved, Definitions: inventory(Updated12, Resolved) };
+var Event17 = { Updated: Updated14, Resolved, Definitions: inventory(Updated14, Resolved) };
 // node_modules/supermemory/dist/esm/generated/core/auth/AuthProvider.js
 function isAuthProvider(value) {
   return typeof value === "object" && value !== null && "getAuthRequest" in value && typeof value.getAuthRequest === "function";
@@ -9820,7 +10483,7 @@ async function getFileWithMetadata(file, { noSniffFileSize } = {}) {
     }, { noSniffFileSize });
   }
   if ("path" in file) {
-    const fs = await import("fs");
+    const fs = await import(["f", "s"].join(""));
     if (!fs?.createReadStream) {
       throw new Error("File path uploads are not supported in this environment.");
     }
@@ -9854,7 +10517,7 @@ function isFileLike(value) {
 }
 async function tryGetFileSizeFromPath(path) {
   try {
-    const fs = await import("fs");
+    const fs = await import(["f", "s"].join(""));
     if (!fs?.promises?.stat) {
       return;
     }
@@ -10055,7 +10718,7 @@ function isArrayBufferView2(value) {
 }
 async function streamToBuffer(stream) {
   if (RUNTIME.type === "node") {
-    const { Readable } = await import("stream");
+    const { Readable } = await import(["s", "t", "r", "e", "a", "m"].join(""));
     if (stream instanceof Readable) {
       const chunks = [];
       for await (const chunk of stream) {
@@ -10883,6 +11546,60 @@ class ConnectorsClient {
   }
 }
 
+// node_modules/supermemory/dist/esm/generated/api/resources/contentManagement/client/Client.js
+class ContentManagementClient {
+  _options;
+  constructor(options = {}) {
+    this._options = normalizeClientOptionsWithAuth(options);
+  }
+  postNsByNamespaceListDocumentsMemoryCounts(namespace, request, requestOptions) {
+    return HttpResponsePromise.fromPromise(this.__postNsByNamespaceListDocumentsMemoryCounts(namespace, request, requestOptions));
+  }
+  async __postNsByNamespaceListDocumentsMemoryCounts(namespace, request, requestOptions) {
+    const _authRequest = await this._options.authProvider.getAuthRequest();
+    const _headers = mergeHeaders(_authRequest.headers, this._options?.headers, requestOptions?.headers);
+    const _response = await fetcher({
+      url: join(await Supplier.get(this._options.baseUrl) ?? await Supplier.get(this._options.environment) ?? SupermemoryEnvironment.Default, `ns/${encodePathParam(namespace)}/list/documents/memory-counts`),
+      method: "POST",
+      headers: _headers,
+      contentType: "application/json",
+      queryString: queryBuilder().mergeAdditional(requestOptions?.queryParams).build(),
+      requestType: "json",
+      body: mergeAdditionalBodyParameters(request, requestOptions?.additionalBodyParameters),
+      timeoutMs: (requestOptions?.timeoutInSeconds ?? this._options?.timeoutInSeconds ?? 60) * 1000,
+      maxRetries: requestOptions?.maxRetries ?? this._options?.maxRetries,
+      abortSignal: requestOptions?.abortSignal,
+      fetchFn: this._options?.fetch,
+      logging: this._options.logging
+    });
+    if (_response.ok) {
+      return {
+        data: _response.body,
+        rawResponse: _response.rawResponse
+      };
+    }
+    if (_response.error.reason === "status-code") {
+      switch (_response.error.statusCode) {
+        case 400:
+          throw new BadRequestError(_response.error.body, _response.rawResponse);
+        case 401:
+          throw new UnauthorizedError(_response.error.body, _response.rawResponse);
+        case 403:
+          throw new ForbiddenError(_response.error.body, _response.rawResponse);
+        case 500:
+          throw new InternalServerError(_response.error.body, _response.rawResponse);
+        default:
+          throw new SupermemoryError({
+            statusCode: _response.error.statusCode,
+            body: _response.error.body,
+            rawResponse: _response.rawResponse
+          });
+      }
+    }
+    return handleNonStatusCodeError(_response.error, _response.rawResponse, "POST", "/ns/{namespace}/list/documents/memory-counts");
+  }
+}
+
 // node_modules/supermemory/dist/esm/generated/api/resources/documents/client/Client.js
 class DocumentsClient {
   _options;
@@ -11523,10 +12240,11 @@ class NamespacesClient {
     return HttpResponsePromise.fromPromise(this.__list(request, requestOptions));
   }
   async __list(request = {}, requestOptions) {
-    const { page, limit } = request;
+    const { page, limit, q } = request;
     const _queryParams = {
       page,
-      limit
+      limit,
+      q
     };
     const _authRequest = await this._options.authProvider.getAuthRequest();
     const _headers = mergeHeaders(_authRequest.headers, this._options?.headers, requestOptions?.headers);
@@ -11951,6 +12669,7 @@ class SupermemoryClient {
   _connectors;
   _namespaces;
   _organization;
+  _contentManagement;
   _feedback;
   constructor(options = {}) {
     this._options = normalizeClientOptionsWithAuth(options);
@@ -11972,6 +12691,9 @@ class SupermemoryClient {
   }
   get organization() {
     return this._organization ??= new OrganizationClient(this._options);
+  }
+  get contentManagement() {
+    return this._contentManagement ??= new ContentManagementClient(this._options);
   }
   get feedback() {
     return this._feedback ??= new FeedbackClient(this._options);
@@ -12115,8 +12837,9 @@ class SupermemoryClient {
     return HttpResponsePromise.fromPromise(this.__list(namespace, type, request, requestOptions));
   }
   async __list(namespace, type, request = {}, requestOptions) {
-    const { page, limit, sort, order, ..._body } = request;
+    const { cursor, page, limit, sort, order, ..._body } = request;
     const _queryParams = {
+      cursor,
       page,
       limit,
       sort: sort != null ? sort : undefined,
@@ -12163,7 +12886,7 @@ class SupermemoryClient {
   }
   async fetch(input, init, requestOptions) {
     return makePassthroughRequest(input, init, {
-      baseUrl: this._options.baseUrl ?? this._options.environment,
+      baseUrl: this._options.baseUrl ?? this._options.environment ?? SupermemoryEnvironment.Default,
       headers: this._options.headers,
       timeoutInSeconds: this._options.timeoutInSeconds,
       maxRetries: this._options.maxRetries,
@@ -13104,7 +13827,7 @@ var Config = loadConfig();
 
 // src/index.ts
 var KEYWORD_PATTERN = /\b(remember|memorize|save\s+this|note\s+this|keep\s+in\s+mind|don'?t\s+forget|learn\s+this|store\s+this|record\s+this|make\s+a\s+note|take\s+note|jot\s+down|commit\s+to\s+memory|never\s+forget|always\s+remember|log\s+this|write\s+down)\b/i;
-var SAVE_NUDGE = `[MEMORY TRIGGER] The user wants you to remember something. 
+var SAVE_NUDGE = `[MEMORY TRIGGER] The user wants you to remember something.
 Use the "supermemory add tool" to save this information.
 Extract the durable facts and save it as a concise memory.
 DO NOT skip this step. The user explicitly asked you to remember.`;
@@ -13173,12 +13896,15 @@ var src_default = define({
       if (!profiledSessions.has(sessionID) && Config.injectProfile) {
         try {
           const profileResponse = await sm.profile(Config.nameSpace);
+          for (const key of Object.keys(profileResponse)) {
+            profileResponse[key] = profileResponse[key].slice(0, 25);
+          }
           await postSynthetic(sessionID, JSON.stringify(profileResponse));
-          profiledSessions.add(sessionID);
           fileLog("info", `Profile injection successful for session:${sessionID}`);
         } catch (error) {
           fileLog("error", `profiile injection failed for session:${sessionID}`, errMsg(error));
         }
+        profiledSessions.add(sessionID);
       } else if (!searchedMessageIds.has(searchKey)) {
         try {
           const searchResults = await sm.search(Config.nameSpace, {
@@ -13189,10 +13915,10 @@ var src_default = define({
           });
           await postSynthetic(sessionID, JSON.stringify(searchResults));
           fileLog("info", `Supermemory search successful for turn:${turnID}`);
-          searchedMessageIds.add(searchKey);
         } catch (error) {
           fileLog("error", `Supermemory prompt-query failed for turn:${turnID}`, errMsg(error));
         }
+        searchedMessageIds.add(searchKey);
       }
       if (!ingestedMessageIds.has(ingestKey)) {
         try {
@@ -13207,7 +13933,8 @@ var src_default = define({
           const contents = [
             `ASSISTANT: ${assistantText}`,
             `USER: ${rawUserMessage}`
-          ].join("|").trim();
+          ].join(`
+`).trim();
           await sm.add(Config.nameSpace, {
             content: contents,
             id: sessionID,
@@ -13251,9 +13978,9 @@ var src_default = define({
             query: { type: "string", description: "Search query text" },
             limit: { type: "number", description: "Max memories to return" },
             threshold: { type: "number", description: "Similarty 0.01 - 1" },
-            rerank: { type: "string", enum: ["none", "order", "aggregate"], description: "Post retrieval ranking, order improves result ordering, aggregate combines overlapping context into cleaner answers, helpful if you want to ensure the most relevant results are returned" },
+            rerank: { type: "string", enum: ["none", "order", "aggregate"], description: "Post retrieval ranking, order improves result ordering, aggregate combines overlapping context into cleaner answers, helpful to ensure highest relevant results" },
             rewriteQuery: { type: "boolean", description: "Expand and clarify the query gbefore retrieavl to improve recall for conversational or underspecified prompts. This incresases latency by 400ms." },
-            include: { type: "object", properties: { documents: { type: "boolean" }, related: { type: "boolean" }, forgotten: { type: "boolean" } }, description: "optional text to include alongside each matching result" },
+            include: { type: "object", properties: { documents: { type: "boolean" }, related: { type: "boolean" }, forgotten: { type: "boolean" } }, description: "optional booleans to broaden the search" },
             searchMode: { type: "string", enum: ["hybrid", "memories", "chunks"], description: "Search surface. hybrid combines learned memories with source chunks. memories returns learned context. chunks returns source passages" }
           },
           required: ["query"],
@@ -13287,7 +14014,7 @@ var src_default = define({
             date: { type: "string", description: "When the source content is from, in ISO 8601 format" },
             metadata: { type: "object", description: "arbitrary metadata attached to the document and derived data" }
           },
-          required: ["content"],
+          required: ["content", "metadata"],
           additionalProperties: false
         },
         options: { namespace: "supermemory" },
@@ -13298,7 +14025,7 @@ var src_default = define({
             id: args.id ?? crypto.randomUUID(),
             supportingContext: args.supportingContext ?? Config.supportingContext,
             taskType: args.taskType ?? "memory",
-            date: args.date ?? new Date().toISOString(),
+            date: new Date().toISOString(),
             metadata: args.metadata,
             dreaming: "dynamic"
           });
@@ -13307,7 +14034,7 @@ var src_default = define({
       });
       editor.add({
         name: "forget",
-        description: "Delete a stored memory. Only on explicit user request.",
+        description: "Delete stored memories by memory id (the id on a search result). Not a document id.",
         input: {
           type: "object",
           properties: {
@@ -13347,7 +14074,7 @@ var src_default = define({
       });
       editor.add({
         name: "get",
-        description: "Open one stored document by ID. Use after list or search.",
+        description: "Open one stored document by documentId (from list or add). Not a memory id.",
         input: {
           type: "object",
           properties: { documentId: { type: "string", description: "Document ID" } },

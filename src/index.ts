@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { Config } from "./config.js";
 
 const KEYWORD_PATTERN = /\b(remember|memorize|save\s+this|note\s+this|keep\s+in\s+mind|don'?t\s+forget|learn\s+this|store\s+this|record\s+this|make\s+a\s+note|take\s+note|jot\s+down|commit\s+to\s+memory|never\s+forget|always\s+remember|log\s+this|write\s+down)\b/i;
-const SAVE_NUDGE = `[MEMORY TRIGGER] The user wants you to remember something. 
+const SAVE_NUDGE = `[MEMORY TRIGGER] The user wants you to remember something.
 Use the "supermemory add tool" to save this information.
 Extract the durable facts and save it as a concise memory.
 DO NOT skip this step. The user explicitly asked you to remember.`;
@@ -63,8 +63,8 @@ export default Plugin.define({
         text,
         delivery: "steer",
         resume: false,
-        metadata: { 
-          source: "supermemory injection" 
+        metadata: {
+          source: "supermemory injection"
           }
         }
       );
@@ -77,7 +77,7 @@ export default Plugin.define({
       const searchKey = `${turnID}:search`;
       const ingestKey = `${turnID}:ingest`;
       if (!rawUserMessage) return;
-      try { 
+      try {
         if (KEYWORD_PATTERN.test(rawUserMessage)) {
           await postSynthetic(sessionID, SAVE_NUDGE)
           fileLog("info", `memory trigger attempted for session:${sessionID}`)
@@ -87,8 +87,11 @@ export default Plugin.define({
       };
       if (!profiledSessions.has(sessionID) && Config.injectProfile) {
         try {
-          const profileResponse = await sm.profile(Config.nameSpace)
-          await postSynthetic(sessionID, JSON.stringify(profileResponse))  
+          const profileResponse: any = await sm.profile(Config.nameSpace)
+          for (const key of Object.keys(profileResponse)) {
+            profileResponse[key] = (profileResponse[key] as unknown[]).slice(0, 25);  // mutates in place
+          }
+          await postSynthetic(sessionID, JSON.stringify(profileResponse))
           fileLog("info", `Profile injection successful for session:${sessionID}`);
         } catch (error) {
             fileLog("error", `profiile injection failed for session:${sessionID}`, errMsg(error));
@@ -105,10 +108,10 @@ export default Plugin.define({
             )
             await postSynthetic(sessionID, JSON.stringify(searchResults))
               fileLog("info", `Supermemory search successful for turn:${turnID}`)
-                searchedMessageIds.add(searchKey)
           } catch (error) {
               fileLog("error", `Supermemory prompt-query failed for turn:${turnID}`, errMsg(error))
           }
+          searchedMessageIds.add(searchKey)
         };
 
       if (!ingestedMessageIds.has(ingestKey)) {
@@ -119,16 +122,16 @@ export default Plugin.define({
           for (const m of msgs) {
             if (m?.type === "assistant") {
               assistantText = (m.content ?? [])
-                .filter((p: any) => p?.type === "text")
-                .map((p: any) => String(p?.text ?? ""))
-                .join("")
-                .trim();
+              .filter((p: any) => p?.type === "text")
+              .map((p: any) => String(p?.text ?? ""))
+              .join("")
+              .trim()
             }
           }
           const contents = [
             `ASSISTANT: ${assistantText}`,
             `USER: ${rawUserMessage}`
-            ].join("|").trim();
+            ].join("\n").trim();
 
           await sm.add(Config.nameSpace, {
             content: contents,
@@ -182,9 +185,9 @@ export default Plugin.define({
             query: { type: "string", description: "Search query text" },
             limit: { type: "number", description: "Max memories to return" },
             threshold: { type: "number", description: "Similarty 0.01 - 1"},
-            rerank: { type: "string", enum: ["none", "order", "aggregate"], description: "Post retrieval ranking, order improves result ordering, aggregate combines overlapping context into cleaner answers, helpful if you want to ensure the most relevant results are returned"},
+            rerank: { type: "string", enum: ["none", "order", "aggregate"], description: "Post retrieval ranking, order improves result ordering, aggregate combines overlapping context into cleaner answers, helpful to ensure highest relevant results"},
             rewriteQuery: { type: "boolean", description: "Expand and clarify the query gbefore retrieavl to improve recall for conversational or underspecified prompts. This incresases latency by 400ms."},
-            include: { type: "object", properties: {documents: { type: "boolean"}, related: { type: "boolean"}, forgotten: { type: "boolean"}}, description: "optional text to include alongside each matching result"},
+            include: { type: "object", properties: {documents: { type: "boolean"}, related: { type: "boolean"}, forgotten: { type: "boolean"}}, description: "optional booleans to broaden the search"},
             searchMode: { type: "string", enum: ["hybrid", "memories", "chunks"], description: "Search surface. hybrid combines learned memories with source chunks. memories returns learned context. chunks returns source passages"}
           },
           required: ["query"],
@@ -197,7 +200,7 @@ export default Plugin.define({
             limit?: number,
             threshold?: number;
             rerank?: "none" | "order" | "aggregate";
-            rewriteQuery?: boolean;
+            rewriteQuery: boolean;
             include?: object;
             searchMode?: "hybrid" | "memories" | "chunks";
           };
@@ -227,7 +230,7 @@ export default Plugin.define({
             date: { type: "string", description: "When the source content is from, in ISO 8601 format"},
             metadata: { type: "object", description: "arbitrary metadata attached to the document and derived data" },
           },
-          required: ["content"],
+          required: ["content", "metadata"],
           additionalProperties: false,
         },
         options: { namespace: "supermemory" },
@@ -237,15 +240,14 @@ export default Plugin.define({
             id?: string;
             supportingContext?: string;
             taskType?: "memory" | "superrag";
-            date?: string;
-            metadata?: Record<string, string | number | boolean | string[]>;
+            metadata: Record<string, string | number | boolean | string[]>;
             };
           const results = await sm.add(Config.nameSpace,  {
             content: args.content,
             id: args.id ?? crypto.randomUUID(),
             supportingContext: args.supportingContext ?? Config.supportingContext,
             taskType: args.taskType ?? "memory",
-            date: args.date ?? new Date().toISOString(),
+            date: new Date().toISOString(),
             metadata: args.metadata,
             dreaming: "dynamic"
           });
@@ -254,7 +256,7 @@ export default Plugin.define({
       });
       editor.add({
         name: "forget",
-        description: "Delete a stored memory. Only on explicit user request.",
+        description: "Delete stored memories by memory id (the id on a search result). Not a document id.",
         input: {
           type: "object",
           properties: {
@@ -294,7 +296,7 @@ export default Plugin.define({
       });
       editor.add({
         name: "get",
-        description: "Open one stored document by ID. Use after list or search.",
+        description: "Open one stored document by documentId (from list or add). Not a memory id.",
         input: {
           type: "object",
           properties: { documentId: { type: "string", description: "Document ID" } },
