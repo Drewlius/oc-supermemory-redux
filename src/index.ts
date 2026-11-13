@@ -5,11 +5,8 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { Config } from "./config.js";
 
-const KEYWORD_PATTERN = /\b(remember|memorize|save\s+this|note\s+this|keep\s+in\s+mind|don'?t\s+forget|learn\s+this|store\s+this|record\s+this|make\s+a\s+note|take\s+note|jot\s+down|commit\s+to\s+memory|never\s+forget|always\s+remember|log\s+this|write\s+down)\b/i;
-const SAVE_NUDGE = `[MEMORY TRIGGER] The user wants you to remember something.
-Use the "supermemory add tool" to save this information.
-Extract the durable facts and save it as a concise memory.
-DO NOT skip this step. The user explicitly asked you to remember.`;
+const KEYWORD_PATTERN = /\b(remember|mind|think|convient|guranteed|promise|memorize|noted|save\s+this|note\s+this|keep\s+in\s+mind|don'?t\s+forget|learn\s+this|store\s+this|record\s+this|make\s+a\s+note|take\s+note|jot\s+down|commit\s+to\s+memory|never\s+forget|always\s+remember|log\s+this|write\s+down)\b/i;
+const SAVE_NUDGE = `[NUDGE TO REMEMBER] If there is someting worth remembering do it now with the supermemory.add tool you do not need permission to complete this action.`
 const ingestedMessageIds = new Set<string>();
 const profiledSessions = new Set<string>();
 const searchedMessageIds = new Set<string>();
@@ -61,10 +58,15 @@ export default Plugin.define({
       return await ctx.session.synthetic({
         sessionID,
         text,
+        description: "[CONTEXT INJECTION, ALWAYS VERIFY]",
         delivery: "steer",
-        resume: false,
+        resume: true,
         metadata: {
-          source: "supermemory injection"
+          source: "SuperMemory v5+",
+          Fact: "No Gurantee",
+          Memories: "Best Attempt At Accuracy",
+          Harness: "OpenCode v2+",
+          Advice: "supermemory.forget bad memories as you see them."
           }
         }
       );
@@ -90,11 +92,24 @@ export default Plugin.define({
           const profileResponse: any = await sm.profile(Config.nameSpace);
           const p = profileResponse?.profile;
           if (p) {
-            p.static?.splice?.(25);
-            p.dynamic?.splice?.(25);
-            if (p.buckets) for (const k in p.buckets) p.buckets[k]?.splice?.(25);
+            p.static?.splice?.(15);
+            p.dynamic?.splice?.(35);
+            if (p.buckets) for (const k in p.buckets) p.buckets[k]?.splice?.(5);
           }
           await postSynthetic(sessionID, JSON.stringify(profileResponse))
+          await sm.add(Config.nameSpace, {
+              id: sessionID,
+              content: `USER: ${rawUserMessage}`, 
+              supportingContext: Config.supportingContext, 
+              taskType: "memory", 
+              date: new Date().toISOString(), 
+              metadata: {
+                contains: "conversation",
+                source: "opencode",
+                session: sessionID
+              }
+            }
+          )
           fileLog("info", `Profile injection successful for session:${sessionID}`);
         } catch (error) {
             fileLog("error", `profiile injection failed for session:${sessionID}`, errMsg(error));
@@ -107,6 +122,9 @@ export default Plugin.define({
               limit: Config.maxMemories,
               threshold: Config.similarityThreshold,
               rewriteQuery: Config.rewriteQuery,
+              rerank: `aggregate`,
+              include: {documents: false, related: true, forgotten: false},
+              searchMode: `memories`
               }
             )
             await postSynthetic(sessionID, JSON.stringify(searchResults))
@@ -132,17 +150,16 @@ export default Plugin.define({
             }
           }
           const contents = [
-            `ASSISTANT: ${assistantText}`,
-            `USER: ${rawUserMessage}`
-            ].join("\n").trim();
+          `ASSISTANT: ${assistantText}`,
+          `USER: ${rawUserMessage}` 
+          ].join("\n").trim()
 
           await sm.add(Config.nameSpace, {
-            content: contents,
             id: sessionID,
+            content: contents,
             supportingContext: Config.supportingContext,
             taskType: "memory",
             date: new Date().toISOString(),
-            dreaming: "dynamic",
             metadata: {
               contains: "conversation",
               source: "opencode",
@@ -157,10 +174,10 @@ export default Plugin.define({
               }
             )
           )
-          ingestedMessageIds.add(ingestKey);
         } catch (error) {
           fileLog("error", `turn ingestion failed for session:${sessionID}`, errMsg(error));
           }
+        ingestedMessageIds.add(ingestKey);
         };
       }
     );
@@ -181,19 +198,19 @@ export default Plugin.define({
     await ctx.tool.transform((editor) =>  {
       editor.add({
         name: "search",
-        description: "Find relevant past memories for the current task. Check on your own when prior context could help.",
+        description: "Find relevant past memories for the current task. Check on your own without needing to be prompted.",
         input: {
           type: "object",
           properties: {
             query: { type: "string", description: "Search query text" },
             limit: { type: "number", description: "Max memories to return" },
             threshold: { type: "number", description: "Similarty 0.01 - 1"},
-            rerank: { type: "string", enum: ["none", "order", "aggregate"], description: "Post retrieval ranking, order improves result ordering, aggregate combines overlapping context into cleaner answers, helpful to ensure highest relevant results"},
+            rerank: { type: "string", enum: ["none", "order", "aggregate"], description: "Post retrieval ranking; order: improves result ordering; aggregate: combines overlapping context into cleaner answers, helpful to ensure highest relevant results"},
             rewriteQuery: { type: "boolean", description: "Expand and clarify the query gbefore retrieavl to improve recall for conversational or underspecified prompts. This incresases latency by 400ms."},
             include: { type: "object", properties: {documents: { type: "boolean"}, related: { type: "boolean"}, forgotten: { type: "boolean"}}, description: "optional booleans to broaden the search"},
             searchMode: { type: "string", enum: ["hybrid", "memories", "chunks"], description: "Search surface. hybrid combines learned memories with source chunks. memories returns learned context. chunks returns source passages"}
           },
-          required: ["query"],
+          required: ["query", ""],
           additionalProperties: false,
         },
         options: { namespace: "supermemory" },
@@ -203,7 +220,7 @@ export default Plugin.define({
             limit?: number,
             threshold?: number;
             rerank?: "none" | "order" | "aggregate";
-            rewriteQuery: boolean;
+            rewriteQuery?: boolean;
             include?: object;
             searchMode?: "hybrid" | "memories" | "chunks";
           };
@@ -211,10 +228,10 @@ export default Plugin.define({
             query: args.query,
             limit: args.limit ?? Config.maxMemories,
             threshold: args.threshold ?? Config.similarityThreshold,
-            rerank: args.rerank ?? "order",
-            rewriteQuery: args.rewriteQuery,
-            include: args.include ?? { related: true },
-            searchMode: args.searchMode ?? "hybrid",
+            rerank: args.rerank ?? "aggregate",
+            rewriteQuery: args.rewriteQuery ?? true,
+            include: args.include ?? { documents: false, related: true, forgotten: false },
+            searchMode: args.searchMode ?? "memories",
           });
           return results;
         }),
@@ -222,18 +239,18 @@ export default Plugin.define({
 
       editor.add({
         name: "add",
-        description: "Save lasting facts, decisions, or setup details. Save on your own when something worth keeping appears.",
+        description: "Save relevant memories, decisions, or important details. Save on your own without being prompted.",
         input: {
           type: "object",
           properties: {
             content: { type: "string", description: "The content to process. This may be plaintext or a URL to suppported rich content" },
             id: { type: "string", description: "optional caller defined documentID for direct retrieval or updating the document later"},
-            supportingContext: { type: "string", description: "Context used to guide memory extraction within this namespace. Max 1500 characters."},
+            supportingContext: { type: "string", description: "Context used to guide memory extraction. Max 1500 characters. Constant until next updated again."},
             taskType: { type: "string", enum: ["memory", "superrag"], description: "Processing pipeline. memory builds durable learned context; superrag optimizes the document for retrieval without generating memories"},
             date: { type: "string", description: "When the source content is from, in ISO 8601 format"},
-            metadata: { type: "object", description: "arbitrary metadata attached to the document and derived data" },
+            metadata: { type: "object", description: "arbitrary metadata in JSON format"},
           },
-          required: ["content", "metadata"],
+          required: ["content","supportingContext"],
           additionalProperties: false,
         },
         options: { namespace: "supermemory" },
@@ -241,17 +258,19 @@ export default Plugin.define({
           const args = input as {
             content: string;
             id?: string;
-            supportingContext?: string;
+            supportingContext: string;
+            date?: string
             taskType?: "memory" | "superrag";
-            metadata: Record<string, string | number | boolean | string[]>;
+            metadata?: Record<string, string | number | boolean | string[]>;
+            dreaming?: string
             };
           const results = await sm.add(Config.nameSpace,  {
             content: args.content,
-            id: args.id ?? crypto.randomUUID(),
-            supportingContext: args.supportingContext ?? Config.supportingContext,
+            id: args.id ?? crypto.randomUUID().toString(),
+            supportingContext: args.supportingContext,
             taskType: args.taskType ?? "memory",
             date: new Date().toISOString(),
-            metadata: args.metadata,
+            metadata: args.metadata ?? {source: "Opencode Agent Generated Memory"},
             dreaming: "dynamic"
           });
           return results;
